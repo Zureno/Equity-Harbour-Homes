@@ -1,20 +1,19 @@
+// owner-portal/app/login/page.tsx
 "use client";
 
 import { useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 
 export default function OwnerLoginPage() {
   const [password, setPassword] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
   const router = useRouter();
-  const searchParams = useSearchParams();
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    setLoading(true);
+    setSubmitting(true);
 
     try {
       const res = await fetch("/api/owner/login", {
@@ -23,58 +22,60 @@ export default function OwnerLoginPage() {
         body: JSON.stringify({ password }),
       });
 
-      const data = await res.json().catch(() => ({}));
-
       if (!res.ok) {
-        setError(data?.error || "Login failed.");
+        const data = await res.json().catch(() => ({}));
+        setError(data.error ?? "Invalid password");
         return;
       }
 
-      const target = searchParams.get("from") || "/";
-      router.push(target);
+      // Login OK → go to dashboard
+      router.push("/");
       router.refresh();
     } catch (err) {
+      console.error(err);
       setError("Something went wrong. Please try again.");
     } finally {
-      setLoading(false);
+      setSubmitting(false);
     }
   };
 
   return (
-    <div className="min-h-screen bg-neutral-950 flex items-center justify-center">
-      <form
-        onSubmit={handleSubmit}
-        className="bg-black border border-neutral-800 rounded-2xl p-6 w-full max-w-sm space-y-4"
-      >
-        <h1 className="text-lg font-semibold text-neutral-100">
+    <main className="min-h-screen bg-neutral-950 text-neutral-50 flex items-center justify-center">
+      <div className="w-full max-w-sm rounded-2xl border border-neutral-800 bg-neutral-900/70 px-6 py-6 shadow-xl">
+        <h1 className="text-lg font-semibold mb-1">
           EquityHarbor Owner Portal
         </h1>
-        <p className="text-xs text-neutral-400">
+        <p className="text-xs text-neutral-400 mb-4">
           For EquityHarbor Homes staff only.
         </p>
 
-        <input
-          type="password"
-          className="w-full rounded-lg bg-neutral-900 border border-neutral-700 px-3 py-2 text-sm text-neutral-50 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          placeholder="Owner password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-        />
-
-        {error && (
-          <div className="text-[11px] text-red-400 bg-red-950/40 border border-red-700/50 rounded-md px-3 py-2">
-            {error}
+        <form onSubmit={onSubmit} className="space-y-3">
+          <div className="space-y-1">
+            <label className="text-xs text-neutral-300">Access password</label>
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full rounded-md bg-neutral-800 px-3 py-2 text-sm outline-none ring-1 ring-neutral-700 focus:ring-indigo-500"
+              placeholder="••••••••••"
+            />
           </div>
-        )}
 
-        <button
-          type="submit"
-          disabled={loading}
-          className="w-full px-4 py-2 rounded-lg bg-indigo-500 hover:bg-indigo-400 text-sm font-semibold text-white disabled:opacity-60"
-        >
-          {loading ? "Signing in..." : "Sign in"}
-        </button>
-      </form>
-    </div>
+          {error && (
+            <div className="text-xs text-red-400 bg-red-950/40 border border-red-900/60 rounded-md px-3 py-2">
+              {error}
+            </div>
+          )}
+
+          <button
+            type="submit"
+            disabled={submitting || !password}
+            className="w-full rounded-md bg-indigo-500 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-400 disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            {submitting ? "Signing in…" : "Sign in"}
+          </button>
+        </form>
+      </div>
+    </main>
   );
 }
