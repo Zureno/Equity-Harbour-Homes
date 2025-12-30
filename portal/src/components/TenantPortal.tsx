@@ -1585,9 +1585,8 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
             >
               <span className="w-1.5 h-1.5 rounded-full bg-transparent" />
               <span>{item}</span>
-              {item === "Messages & Alerts" && (
-                <span className="ml-auto w-2 h-2 rounded-full bg-red-500" />
-              )}
+              {item === "Messages & Alerts"
+              }
             </button>
           ))}
         </nav>

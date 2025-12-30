@@ -1,6 +1,7 @@
 // owner-portal/app/page.tsx
 import Link from "next/link";
 import { getTenantsWithSummaries } from "@/lib/tenantSummary";
+import DeleteTenantButton from "@/components/owner/DeleteTenantButton";
 
 export const dynamic = "force-dynamic";
 
@@ -63,12 +64,20 @@ export default async function OwnerDashboardPage() {
                   </div>
                 </div>
 
-                <Link
-                  href={`/tenants/${t.id}`}
-                  className="inline-flex items-center rounded-md bg-neutral-800 px-3 py-1.5 text-xs font-medium text-neutral-50 hover:bg-neutral-700"
-                >
-                  Open ledger
-                </Link>
+                {/* Right side: Open ledger + Delete */}
+                <div className="flex items-center gap-2">
+                  <Link
+                    href={`/tenants/${t.id}`}
+                    className="inline-flex items-center rounded-md bg-neutral-800 px-3 py-1.5 text-xs font-medium text-neutral-50 hover:bg-neutral-700"
+                  >
+                    Open ledger
+                  </Link>
+
+                  <DeleteTenantButton
+                    tenantId={t.id}
+                    tenantName={t.full_name || "Unnamed tenant"}
+                  />
+                </div>
               </div>
             ))}
           </div>
