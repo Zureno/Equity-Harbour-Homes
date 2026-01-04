@@ -1,13 +1,20 @@
 // owner-portal/app/api/owner/create-tenant/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { supabaseAdmin } from "../../../../lib/supabaseAdmin";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-export const dynamic = "force-dynamic";
+function generateTempPassword(length = 12): string {
+  const chars =
+    "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@$?";
+  let out = "";
+  for (let i = 0; i < length; i++) {
+    out += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return out;
+}
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
-    const { fullName, email, unitLabel } = body || {};
+    const { fullName, email, unitLabel, startingBalance } = await req.json();
 
     if (!fullName || !email || !unitLabel) {
       return NextResponse.json(
@@ -16,59 +23,69 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 1) Create Supabase auth user for tenant
-    //    We generate a random password; in real life you might send
-    //    them a password-reset / magic-link instead.
-    const randomPassword =
-      Math.random().toString(36).slice(-10) +
-      Math.random().toString(36).slice(-10);
+    const tempPassword = generateTempPassword();
 
-    const { data: userResult, error: userError } =
+    // 1) Create Supabase Auth user for the tenant
+    const { data: userData, error: userError } =
       await supabaseAdmin.auth.admin.createUser({
         email,
-        password: randomPassword,
+        password: tempPassword,
         email_confirm: true,
         user_metadata: {
           role: "tenant",
-          full_name: fullName,
-          unit_label: unitLabel,
         },
       });
 
-    if (userError || !userResult?.user) {
-      console.error("[create-tenant] createUser error:", userError);
+    if (userError || !userData?.user) {
+      console.error("Failed to create auth user for tenant:", userError);
       return NextResponse.json(
-        { error: "Failed to create tenant login user" },
+        { error: "Failed to create tenant login" },
         { status: 500 }
       );
     }
 
-    const userId = userResult.user.id;
+    const user = userData.user;
 
-    // 2) Insert row into tenants table
-    const { error: tenantError } = await supabaseAdmin
+    // 2) Insert tenant row linked to that auth user
+    const { data: tenant, error: tenantError } = await supabaseAdmin
       .from("tenants")
       .insert({
-        id: userId, // IMPORTANT: matches auth user id
         full_name: fullName,
         email,
         unit_label: unitLabel,
-      });
+        user_id: user.id, // FK to auth.users.id
+      })
+      .select("id")
+      .single();
 
-    if (tenantError) {
-      console.error("[create-tenant] insert tenants error:", tenantError);
+    if (tenantError || !tenant) {
+      console.error("Supabase insert tenant error:", tenantError);
+
+      // rollback auth user if tenant row fails
+      try {
+        await supabaseAdmin.auth.admin.deleteUser(user.id);
+      } catch (e) {
+        console.error("Failed to rollback auth user:", e);
+      }
+
       return NextResponse.json(
-        { error: "Failed to insert tenant record" },
+        { error: "Failed to create tenant record" },
         { status: 500 }
       );
     }
 
-    // 3) Return the new tenant id so UI can redirect
-    return NextResponse.json({ tenantId: userId }, { status: 201 });
-  } catch (err: any) {
-    console.error("[create-tenant] unexpected error:", err);
+    // (Optional) startingBalance logic (create initial charge/payment) can go here
+
+    // 3) Return tenantId + tempPassword to the UI
+    return NextResponse.json({
+      ok: true,
+      tenantId: tenant.id,
+      tempPassword,
+    });
+  } catch (err) {
+    console.error("Unexpected error in /api/owner/create-tenant:", err);
     return NextResponse.json(
-      { error: "Unexpected error creating tenant" },
+      { error: "Unexpected server error" },
       { status: 500 }
     );
   }

@@ -6,6 +6,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { useRouter } from "next/navigation";
 import { supabase } from "../lib/supabaseClient";
 import type { TenantUser } from "../app/page";
 
@@ -153,6 +154,7 @@ const DOC_LABELS: Record<string, string> = {
 // ---------------------------------------------------------------------------
 
 const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
+  const router = useRouter();
   // Navigation
   const [activeSection, setActiveSection] =
     useState<MainSection>("Home");
@@ -1569,6 +1571,12 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
             <button
               key={item}
               onClick={() => {
+                if (item === "Lease & Documents") {
+                  const encodedName = encodeURIComponent(user.name ?? "");
+                  router.push(`/documents?tenantId=${user.id}&tenantName=${encodedName}`);   // 🔴 go to tenant upload page
+                  return;
+                }
+
                 setActiveSection(item);
                 setShowMaintenanceForm(false);
                 setEditingOnboardingItem(null);

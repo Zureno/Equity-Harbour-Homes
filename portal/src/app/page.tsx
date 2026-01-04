@@ -37,7 +37,6 @@ export default function HomePage() {
 
     const init = async () => {
       console.log("[HomePage] init start");
-
       try {
         const { data, error } = await supabase.auth.getSession();
         console.log("[HomePage] getSession:", { data, error });
@@ -46,19 +45,15 @@ export default function HomePage() {
 
         const session = data?.session;
 
-        // Not logged in → show login
         if (!session) {
-          if (!cancelled) {
-            setState({ status: "unauth" });
-          }
+          if (!cancelled) setState({ status: "unauth" });
           return;
         }
 
-        // Load tenant row
         const { data: tenantRow, error: tenantError } = await supabase
           .from("tenants")
           .select("id, full_name, email, unit_label")
-          .eq("id", session.user.id)
+          .eq("user_id", session.user.id)
           .single();
 
         console.log("[HomePage] tenantRow:", { tenantRow, tenantError });
@@ -93,7 +88,6 @@ export default function HomePage() {
           });
         }
 
-        // Clear any bad session so next login is clean
         try {
           await supabase.auth.signOut();
         } catch {
@@ -102,7 +96,7 @@ export default function HomePage() {
       }
     };
 
-    init();
+    void init();
 
     return () => {
       cancelled = true;
@@ -121,7 +115,6 @@ export default function HomePage() {
     }
   };
 
-  // 1) Loading state
   if (state.status === "loading") {
     return (
       <div className="min-h-screen bg-neutral-950 text-neutral-50 flex items-center justify-center">
@@ -132,11 +125,9 @@ export default function HomePage() {
     );
   }
 
-  // 2) Not authenticated or error → show login (with message if any)
   if (state.status === "unauth") {
     return <LoginPage errorMessage={state.error} />;
   }
 
-  // 3) Authenticated → show portal
   return <TenantPortal user={state.tenant} onLogout={handleLogout} />;
 }
