@@ -1,74 +1,56 @@
-// owner-portal/app/api/owner/tenants/[tenantId]/upload-doc/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { supabaseAdmin } from "@/lib/supabaseAdmin";
-
-export const runtime = "nodejs"; // we want Node, not edge, for file handling
+import { supabaseAdmin } from "@/lib/supabaseAdmin"; // <-- or your actual admin client path
 
 export async function POST(
   req: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{}> }   // 👈 match Next's expected type
 ) {
   try {
-    const tenantId = params.id;
-    const body = await req.json().catch(() => ({} as any));
-    const docType: string | undefined = body.docType;
-    const fileName: string | undefined = body.fileName;
-    const storagePath: string | undefined = body.storagePath;
-    const formData = await req.formData();
-    const file = formData.get("file") as File | null;
-    const category = (formData.get("category") as string | null) ?? "lease";
+    // params is a Promise; await and cast so we can read `id`
+    const { id } = (await params) as { id: string };
+    const tenantId = id;
 
     if (!tenantId) {
-        return NextResponse.json(
-            { error: "Missing tenantId in URL."},
-            { status: 400 }
-        );
-    }
-
-    if (!file) {
       return NextResponse.json(
-        { error: "Missing file" },
+        { error: "Missing tenantId in URL." },
         { status: 400 }
       );
     }
 
-    // Build a unique path in the bucket
-    const path = `tenant/${tenantId}/${Date.now()}-${file.name}`;
+    const body = await req.json().catch(() => ({} as any));
 
-    // 1) Upload to storage bucket
-    const { error: uploadError } = await supabaseAdmin.storage
-      .from("tenant-docs")
-      .upload(path, file);
+    const docType: string | undefined = body.docType;
+    const fileName: string | undefined = body.fileName;
+    const storagePath: string | undefined = body.storagePath;
 
-    if (uploadError) {
-      console.error("[upload-doc] storage error:", uploadError);
+    if (!docType || !fileName || !storagePath) {
       return NextResponse.json(
-        { error: "Failed to upload file" },
-        { status: 500 }
+        { error: "Missing docType, fileName or storagePath in body." },
+        { status: 400 }
       );
     }
 
-    // 2) Insert metadata row
-    const { error: insertError } = await supabaseAdmin
-      .from("tenant_documents")
+    // Insert into tenant_docs
+    const { error } = await supabaseAdmin
+      .from("tenant_docs")
       .insert({
         tenant_id: tenantId,
-        file_name: file.name,
-        file_path: path,
-        category,
+        doc_type: docType,
+        file_name: fileName,
+        storage_path: storagePath,
       });
 
-    if (insertError) {
-      console.error("[upload-doc] insert error:", insertError);
+    if (error) {
+      console.error("[upload-doc] DB insert error", error);
       return NextResponse.json(
-        { error: "Failed to save document metadata" },
+        { error: "Could not save document info." },
         { status: 500 }
       );
     }
 
     return NextResponse.json({ ok: true });
   } catch (err) {
-    console.error("[upload-doc] POST error:", err);
+    console.error("[upload-doc] POST error", err);
     return NextResponse.json(
       { error: "Unexpected error processing upload-doc." },
       { status: 500 }
