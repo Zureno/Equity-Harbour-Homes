@@ -1,7 +1,6 @@
-// owner-portal/src/app/documents/DocumentsPageClient.tsx
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { supabase } from "../../lib/supabaseClient";
 
@@ -28,7 +27,7 @@ type TenantDoc = {
   created_at: string | null;
 };
 
-const DocumentsPageClient: React.FC = () => {
+const DocumentsPageContent: React.FC = () => {
   const router = useRouter();
   const searchParams = useSearchParams();
   const tenantIdFromUrl = searchParams.get("tenantId");
@@ -83,6 +82,7 @@ const DocumentsPageClient: React.FC = () => {
           // when coming from owner portal with tenantName in URL
           setTenantLabel(tenantNameFromUrl);
         } else {
+          // here effectiveTenantId is definitely non-null
           setTenantLabel(`Unit ${effectiveTenantId.slice(0, 8)}…`);
         }
 
@@ -346,4 +346,19 @@ const DocumentsPageClient: React.FC = () => {
   );
 };
 
-export default DocumentsPageClient;
+// Top-level page wrapped in Suspense so useSearchParams is allowed
+const DocumentsPage: React.FC = () => {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen bg-black text-neutral-50 flex items-center justify-center text-xs">
+          Loading documents…
+        </div>
+      }
+    >
+      <DocumentsPageContent />
+    </Suspense>
+  );
+};
+
+export default DocumentsPage;
