@@ -1,3 +1,4 @@
+// owner-portal/src/app/documents/DocumentsPageClient.tsx
 "use client";
 
 import React, { useEffect, useState } from "react";
@@ -21,13 +22,13 @@ const DOC_LABELS: Record<string, string> = {
 type TenantDoc = {
   id: string;
   tenant_id: string;
-  doc_type: TenantDocType | null;
+  doc_type: string | null;
   file_name: string | null;
   storage_path: string | null;
   created_at: string | null;
 };
 
-const DocumentsPage: React.FC = () => {
+const DocumentsPageClient: React.FC = () => {
   const router = useRouter();
   const searchParams = useSearchParams();
   const tenantIdFromUrl = searchParams.get("tenantId");
@@ -52,7 +53,6 @@ const DocumentsPage: React.FC = () => {
 
       try {
         let effectiveTenantId = tenantIdFromUrl;
-        let label: string | null = null;
 
         // If we didn't get tenantId in the URL, try to find tenant by email
         if (!effectiveTenantId) {
@@ -76,23 +76,17 @@ const DocumentsPage: React.FC = () => {
           }
 
           effectiveTenantId = t2.id;
-          label = `${t2.name ?? ""}${t2.unit ? ` • Unit ${t2.unit}` : ""}`;
+          setTenantLabel(
+            `${t2.name ?? ""}${t2.unit ? ` • Unit ${t2.unit}` : ""}`
+          );
+        } else if (tenantNameFromUrl) {
+          // when coming from owner portal with tenantName in URL
+          setTenantLabel(tenantNameFromUrl);
         } else {
-          // Coming from the tenant portal – prefer the tenantName in the URL
-          if (tenantNameFromUrl) {
-            label = decodeURIComponent(tenantNameFromUrl);
-          } else {
-            label = `Unit ${effectiveTenantId.slice(0, 8)}…`;
-          }
-        }
-
-        if (!effectiveTenantId) {
-          setError("Could not determine your tenant id.");
-          return;
+          setTenantLabel(`Unit ${effectiveTenantId.slice(0, 8)}…`);
         }
 
         setTenantId(effectiveTenantId);
-        if (label) setTenantLabel(label);
 
         // Load existing docs
         const { data: docsData, error: docsErr } = await supabase
@@ -352,4 +346,4 @@ const DocumentsPage: React.FC = () => {
   );
 };
 
-export default DocumentsPage;
+export default DocumentsPageClient;
