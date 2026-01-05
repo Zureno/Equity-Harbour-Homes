@@ -10,7 +10,7 @@ import { supabaseAdmin } from "@/lib/supabaseAdmin";
 export type TenantRow = {
   id: string;
   full_name: string | null;
-  email: string;
+  email: string | null;
   unit_label: string | null;
 };
 
@@ -41,30 +41,41 @@ export type TenantLedger = {
 };
 
 /**
- * Load tenant + all charges & payments for that tenant.
- * IMPORTANT: this never sends an `undefined` id to Postgres.
+ * Load a single tenant row for the balance / ledger view.
  */
-export async function getTenantLedger(tenantId: string): Promise<TenantLedger> {
-  // Guard against bad calls
+export async function getTenantForBalance(
+  tenantId: string
+): Promise<TenantRow | null> {
   if (!tenantId) {
-    console.error("getTenantLedger called without tenantId");
-    return {
-      tenant: null,
-      charges: [],
-      payments: [],
-      balanceCents: 0,
-    };
+    console.error("[tenantBalance] getTenantForBalance called without tenantId");
+    return null;
   }
 
-  // 1) Tenant row
-  const { data: tenant, error: tenantError } = await supabaseAdmin
+  const { data, error } = await supabaseAdmin
     .from("tenants")
-    .select<"*,full_name,email,unit_label", TenantRow>("id, full_name, email, unit_label")
+    .select("id, full_name, email, unit_label")
     .eq("id", tenantId)
     .single();
 
-  if (tenantError) {
-    console.error("Tenant fetch error:", tenantError);
+  if (error) {
+    console.error("[tenantBalance] failed to load tenant", error);
+    return null;
+  }
+
+  if (!data) return null;
+
+  return data as TenantRow;
+}
+
+/**
+ * Load tenant + all charges & payments for that tenant.
+ */
+export async function getTenantLedger(
+  tenantId: string
+): Promise<TenantLedger> {
+  // Guard against bad calls
+  if (!tenantId) {
+    console.error("[tenantBalance] getTenantLedger called without tenantId");
     return {
       tenant: null,
       charges: [],
@@ -73,28 +84,43 @@ export async function getTenantLedger(tenantId: string): Promise<TenantLedger> {
     };
   }
 
+  // 1) Tenant details
+  const tenant = await getTenantForBalance(tenantId);
+  const effectiveTenantId = tenant?.id ?? tenantId;
+
   // 2) Charges
-  const { data: charges = [], error: chargesError } = await supabaseAdmin
+  const {
+    data: chargesData,
+    error: chargesError,
+  } = await supabaseAdmin
     .from("tenant_charges")
-    .select<"*", ChargeRow>("*")
-    .eq("tenant_id", tenant.id)
+    .select("*")
+    .eq("tenant_id", effectiveTenantId)
     .order("created_at", { ascending: false });
 
   if (chargesError) {
-    console.error("Charges fetch error:", chargesError);
+    console.error("[tenantBalance] charges fetch error:", chargesError);
   }
 
+  const charges: ChargeRow[] = (chargesData ?? []) as ChargeRow[];
+
   // 3) Payments
-  const { data: payments = [], error: paymentsError } = await supabaseAdmin
+  const {
+    data: paymentsData,
+    error: paymentsError,
+  } = await supabaseAdmin
     .from("tenant_payments")
-    .select<"*", PaymentRow>("*")
-    .eq("tenant_id", tenant.id)
+    .select("*")
+    .eq("tenant_id", effectiveTenantId)
     .order("created_at", { ascending: false });
 
   if (paymentsError) {
-    console.error("Payments fetch error:", paymentsError);
+    console.error("[tenantBalance] payments fetch error:", paymentsError);
   }
 
+  const payments: PaymentRow[] = (paymentsData ?? []) as PaymentRow[];
+
+  // 4) Compute balance
   const totalCharges = charges.reduce(
     (sum, c) => sum + (c.amount_cents ?? 0),
     0
