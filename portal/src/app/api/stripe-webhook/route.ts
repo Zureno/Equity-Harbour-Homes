@@ -2,18 +2,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
 import { createClient } from "@supabase/supabase-js";
-import { supabaseAdmin } from "@/lib/supabaseAdmin"; 
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string);
-export const dynamic = "force-dynamic";
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
+
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY! // needs service role so it can write
+);
 
 export async function POST(req: NextRequest) {
   const sig = req.headers.get("stripe-signature");
-  if (!sig) {
-    return new NextResponse("Missing stripe-signature header", {
-      status: 400,
-    });
-  }
 
   const rawBody = await req.text();
 
@@ -21,64 +19,58 @@ export async function POST(req: NextRequest) {
   try {
     event = stripe.webhooks.constructEvent(
       rawBody,
-      sig,
-      process.env.STRIPE_WEBHOOK_SECRET as string
+      sig!,
+      process.env.STRIPE_WEBHOOK_SECRET!
     );
   } catch (err: any) {
-    console.error("Webhook signature verification failed", err.message);
-    return new NextResponse(`Webhook Error: ${err.message}`, {
-      status: 400,
-    });
+    console.error("[stripe-webhook] signature error", err.message);
+    return new NextResponse(`Webhook Error: ${err.message}`, { status: 400 });
   }
+
+  console.log("[stripe-webhook] Received event", event.type);
 
   if (event.type === "checkout.session.completed") {
     const session = event.data.object as Stripe.Checkout.Session;
 
-    const tenantId = session.metadata?.tenant_id || null;
-    const chargeId = session.metadata?.charge_id || null;
-    const note = session.metadata?.note || null;
-    const reference = session.metadata?.reference || null;
-    const amountTotal = session.amount_total; // in cents
+    const tenantId = session.metadata?.tenant_id;
+    const amountCents = session.amount_total ?? 0;
+    const amount = amountCents / 100;
 
-    if (!tenantId || !amountTotal) {
-      console.warn(
-        "checkout.session.completed without tenantId or amount_total",
+    if (!tenantId || amount <= 0) {
+      console.error(
+        "[stripe-webhook] Missing tenantId or amount on session",
         session.id
       );
-    } else {
-      // 1) Insert payment record
-      const { error: insertError } = await supabaseAdmin
-        .from("payments")
-        .insert({
-          tenant_id: tenantId,
-          amount: amountTotal / 100,
-          method: "Online (card) – Stripe",
-          status: "paid",
-          note,
-          external_id: session.id,
-          reference,
-          charge_id: chargeId || null, // ok if you skipped this column
-        });
-
-      if (insertError) {
-        console.error("Error inserting payment into Supabase `payments`:", insertError);
-      }
-
-      // 2) Mark the corresponding charge as paid
-      if (chargeId) {
-        const { error: chargeError } = await supabaseAdmin
-          .from("charges")
-          .update({ is_paid: true })
-          .eq("id", chargeId);
-
-        if (chargeError) {
-          console.error("Error marking charge as paid:", chargeError);
-        }
-      }
+      return NextResponse.json({ received: true });
     }
-  } else {
-    console.log(`Unhandled Stripe event type: ${event.type}`);
+
+    // 1) Insert payment row
+    const { error: payErr } = await supabase.from("payments").insert({
+      tenant_id: tenantId,
+      amount,
+      method: "Online card (Stripe)",
+      note: `Stripe session ${session.id}`,
+    });
+
+    if (payErr) {
+      console.error("[stripe-webhook] payments insert error", payErr);
+    }
+
+    // 2) (Optional) mark all open charges as paid for now
+    const { error: chargeErr } = await supabase
+      .from("charges")
+      .update({
+        is_paid: true,
+        paid_at: new Date().toISOString(),
+      })
+      .eq("tenant_id", tenantId)
+      .eq("is_paid", false);
+
+    if (chargeErr) {
+      console.error("[stripe-webhook] charges update error", chargeErr);
+    }
   }
 
+  // Ignore other event types for now
   return NextResponse.json({ received: true });
 }

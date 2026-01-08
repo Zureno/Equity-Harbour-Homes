@@ -1,3 +1,4 @@
+// portal/src/components/TenantPortal.tsx
 "use client";
 
 import React, {
@@ -10,9 +11,9 @@ import { useRouter } from "next/navigation";
 import { supabase } from "../lib/supabaseClient";
 import type { TenantUser } from "../app/page";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+/* ------------------------------------------------------------------------- */
+/* Types                                                                     */
+/* ------------------------------------------------------------------------- */
 
 type Props = {
   user: TenantUser;
@@ -77,6 +78,8 @@ type MainSection =
   | "Important Links";
 
 type TopTab = "Quick Links" | "Announcements" | "Inspections" | "Documents";
+
+/* ------------------------------------------------------------------------- */
 
 const menuItems: MainSection[] = [
   "Home",
@@ -149,12 +152,13 @@ const DOC_LABELS: Record<string, string> = {
   sign_lease: "Signed lease",
 };
 
-// ---------------------------------------------------------------------------
-// Component
-// ---------------------------------------------------------------------------
+/* ------------------------------------------------------------------------- */
+/* Component                                                                 */
+/* ------------------------------------------------------------------------- */
 
 const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
   const router = useRouter();
+
   // Navigation
   const [activeSection, setActiveSection] =
     useState<MainSection>("Home");
@@ -170,7 +174,7 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
   const [section8, setSection8] = useState<Section8Case | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
 
-  // NEW: overall ledger balance + error (matches owner portal)
+  // Overall ledger balance (live from charges & payments)
   const [overallBalance, setOverallBalance] =
     useState<number | null>(null);
   const [balanceError, setBalanceError] =
@@ -246,49 +250,51 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
 
   const autoPayEnabled = false; // reserved for future
 
-  // -------------------------------------------------------------------------
-  // Load dashboard data
-  // -------------------------------------------------------------------------
+  /* --------------------------------------------------------------------- */
+  /* Load dashboard data                                                   */
+  /* --------------------------------------------------------------------- */
 
   const loadDashboard = useCallback(async () => {
     setLoading(true);
-    setBalanceError(null); // NEW: reset balance error each load
+    setBalanceError(null);
 
     try {
-      // NEW: overall current balance from tenant_balances
+      const tenantId = user.id;
+      console.log("[TenantPortal] loadDashboard for tenant", tenantId);
+
+      /* ------------------------------------------------------------------- */
+      /* 1) OVERALL BALANCE – same view as owner portal                      */
+      /* ------------------------------------------------------------------- */
+
       const { data: balanceRow, error: balanceErr } = await supabase
-        .from("tenant_balances")
+        .from("tenant_balances_view")
         .select("current_balance")
-        .eq("tenant_id", user.id)
+        .eq("tenant_id", tenantId)
         .maybeSingle();
 
       if (balanceErr) {
-        console.error(
-          "[TenantPortal] tenant_balances error",
-          balanceErr
-        );
-        setBalanceError(
-          "We couldn't load your latest balance yet. Amounts may be slightly out of date."
-        );
+        console.error("[TenantPortal] balance error", balanceErr);
+        throw balanceErr;
       }
 
-      if (balanceRow && balanceRow.current_balance != null) {
-        const numeric = Number(balanceRow.current_balance);
-        setOverallBalance(
-          Number.isFinite(numeric) ? numeric : 0
-        );
-      } else if (!balanceErr) {
-        // no row yet = zero balance
-        setOverallBalance(0);
-      }
+      const currentBalance = Number(balanceRow?.current_balance ?? 0);
+      console.log("[TenantPortal] current_balance", currentBalance);
+      setOverallBalance(currentBalance);
 
-      // Section 8 info
+      // Use net balance as the tenant's unpaid portion
+      const unpaidPortion = Math.max(currentBalance, 0);
+      setAmountDue(unpaidPortion);
+
+      /* ------------------------------------------------------------------- */
+      /* 2) SECTION 8 INFO                                                   */
+      /* ------------------------------------------------------------------- */
+
       const { data: s8 } = await supabase
         .from("section8_cases")
         .select(
           "hap_amount, tenant_portion, next_inspection_date, next_recertification_date, housing_authority_name, caseworker_name, caseworker_email"
         )
-        .eq("tenant_id", user.id)
+        .eq("tenant_id", tenantId)
         .maybeSingle();
 
       if (s8) {
@@ -305,73 +311,111 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
         setSection8(null);
       }
 
-      // Current month charges (unpaid tenant portion)
-      const today = new Date();
-      const monthStart = new Date(
-        today.getFullYear(),
-        today.getMonth(),
-        1
-      )
-        .toISOString()
-        .slice(0, 10);
-      const monthEnd = new Date(
-        today.getFullYear(),
-        today.getMonth() + 1,
-        0
-      )
-        .toISOString()
-        .slice(0, 10);
+      /* ------------------------------------------------------------------- */
+      /* 3) UNPAID CHARGES (FOR STRIPE)                                      */
+      /*    Try tenant_charges first, then fall back to charges              */
+      /* ------------------------------------------------------------------- */
 
-      const { data: charges } = await supabase
-        .from("charges")
-        .select("id, amount, due_date, is_paid, description")
-        .eq("tenant_id", user.id)
-        .eq("is_paid", false)
-        .gte("due_date", monthStart)
-        .lte("due_date", monthEnd)
+      let unpaidCharges: any[] | null = null;
+
+      // 3a) tenant_charges with amount_cents
+      const { data: tenantCharges, error: tenantChargesErr } = await supabase
+        .from("tenant_charges")
+        .select("id, amount_cents, description, due_date, is_paid")
+        .eq("tenant_id", tenantId)
+        .or("is_paid.is.null,is_paid.eq.false")
         .order("due_date", { ascending: true });
 
-      if (charges && charges.length > 0) {
-        const total = charges.reduce(
-          (sum: number, c: any) => sum + Number(c.amount || 0),
-          0
-        );
-        setAmountDue(total);
+      console.log("[TenantPortal] tenant_charges query result", {
+        tenantCharges,
+        tenantChargesErr,
+      });
 
-        const first = charges[0] as any;
+      if (tenantChargesErr) {
+        console.error(
+          "[TenantPortal] tenant_charges error (non-fatal)",
+          tenantChargesErr
+        );
+      }
+
+      if (tenantCharges && tenantCharges.length > 0) {
+        unpaidCharges = tenantCharges.map((c: any) => ({
+          id: c.id,
+          amountDollars: Number(c.amount_cents || 0) / 100,
+          description: c.description ?? null,
+          due_date: c.due_date,
+        }));
+      }
+
+      // 3b) Fallback: charges with amount in dollars
+      if (!unpaidCharges || unpaidCharges.length === 0) {
+        const { data: simpleCharges, error: simpleErr } = await supabase
+          .from("charges")
+          .select("id, amount, description, due_date, is_paid, tenant_id")
+          .eq("tenant_id", tenantId)
+          .or("is_paid.is.null,is_paid.eq.false")
+          .order("due_date", { ascending: true });
+
+        console.log("[TenantPortal] charges (fallback) query result", {
+          simpleCharges,
+          simpleErr,
+        });
+
+        if (simpleErr) {
+          console.error("[TenantPortal] charges fallback error", simpleErr);
+        }
+
+        if (simpleCharges && simpleCharges.length > 0) {
+          unpaidCharges = simpleCharges.map((c: any) => ({
+            id: c.id,
+            amountDollars: Number(c.amount || 0),
+            description: c.description ?? null,
+            due_date: c.due_date,
+          }));
+        }
+      }
+
+      // IMPORTANT: we only use unpaidCharges to pick a currentCharge for Stripe,
+      // not to calculate the displayed "Your portion (unpaid)".
+      if (unpaidCharges && unpaidCharges.length > 0) {
+        const first = unpaidCharges[0];
         setCurrentCharge({
           id: first.id,
-          amount: Number(first.amount || 0),
-          description: first.description ?? null,
+          amount: first.amountDollars,
+          description: first.description,
           due_date: first.due_date,
         });
+
+        console.log("[TenantPortal] currentCharge set to", first);
       } else {
-        setAmountDue(0);
+        console.log("[TenantPortal] no unpaid charges found in either table");
         setCurrentCharge(null);
       }
 
-      // Onboarding items with join to onboarding_steps
-      const { data: onboardingRows, error: onboardingErr } =
-        await supabase
-          .from("tenant_onboarding")
-          .select(
-            `
-            id,
-            tenant_id,
-            step_id,
-            status,
-            data,
-            onboarding_steps (
-              id,
-              code,
-              title,
-              sort_order
-            )
-          `
-          )
-          .eq("tenant_id", user.id);
+      /* ------------------------------------------------------------------- */
+      /* 4) ONBOARDING ITEMS                                                 */
+      /* ------------------------------------------------------------------- */
 
-      console.log("DEBUG tenant_onboarding raw", {
+      const { data: onboardingRows, error: onboardingErr } = await supabase
+        .from("tenant_onboarding")
+        .select(
+          `
+        id,
+        tenant_id,
+        step_id,
+        status,
+        data,
+        onboarding_steps (
+          id,
+          code,
+          title,
+          sort_order
+        )
+      `
+        )
+        .eq("tenant_id", tenantId);
+
+      console.log("[TenantPortal] tenant_onboarding raw", {
         rows: onboardingRows,
         onboardingErr,
       });
@@ -395,26 +439,19 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
             };
             return item;
           })
-          .filter(
-            (x): x is OnboardingItem => x !== null
-          )
+          .filter((x): x is OnboardingItem => x !== null)
           .sort((a, b) => a.sort_order - b.sort_order);
       }
 
-      console.log("DEBUG onboardingList", list);
       setOnboardingItems(list);
 
-      // Overall onboarding_status
       let derivedStatus: string | null = null;
       if (list.length === 0) {
         derivedStatus = null;
       } else if (list.every((i) => i.status === "completed")) {
         derivedStatus = "active";
       } else if (
-        list.some(
-          (i) =>
-            i.status === "in_progress" || i.status === "completed"
-        )
+        list.some((i) => i.status === "in_progress" || i.status === "completed")
       ) {
         derivedStatus = "in_progress";
       } else {
@@ -427,14 +464,17 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
         await supabase
           .from("tenants")
           .update({ onboarding_status: derivedStatus })
-          .eq("id", user.id);
+          .eq("id", tenantId);
       }
 
-      // Docs
+      /* ------------------------------------------------------------------- */
+      /* 5) DOCUMENTS                                                        */
+      /* ------------------------------------------------------------------- */
+
       const { data: docRows, error: docErr } = await supabase
         .from("tenant_docs")
         .select("*")
-        .eq("tenant_id", user.id)
+        .eq("tenant_id", tenantId)
         .order("created_at", { ascending: false });
 
       if (docErr) {
@@ -446,11 +486,14 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
         setDocsError(null);
       }
 
-      // Payments history
+      /* ------------------------------------------------------------------- */
+      /* 6) PAYMENT HISTORY                                                  */
+      /* ------------------------------------------------------------------- */
+
       const { data: paymentRows, error: payErr } = await supabase
         .from("payments")
         .select("id, tenant_id, amount, method, note, created_at")
-        .eq("tenant_id", user.id)
+        .eq("tenant_id", tenantId)
         .order("created_at", { ascending: false });
 
       if (payErr) {
@@ -459,6 +502,11 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
       } else if (paymentRows) {
         setPayments(paymentRows as PaymentRow[]);
       }
+    } catch (err: any) {
+      console.error("[TenantPortal] loadDashboard error", err);
+      setBalanceError(
+        "We couldn't load your latest balance yet. Amounts may be slightly out of date."
+      );
     } finally {
       setLoading(false);
     }
@@ -468,25 +516,23 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
     loadDashboard();
   }, [loadDashboard]);
 
-  // -------------------------------------------------------------------------
-  // Read payment status + tab from URL (after Stripe redirect)
-  // -------------------------------------------------------------------------
+  /* --------------------------------------------------------------------- */
+  /* Handle Stripe redirect params                                         */
+  /* --------------------------------------------------------------------- */
 
   useEffect(() => {
     if (typeof window === "undefined") return;
 
     const url = new URL(window.location.href);
 
-    // 1) If tab=payments, show the Payments screen right away
     const tab = url.searchParams.get("tab");
     if (tab === "payments") {
       setActiveSection("Payments");
     }
 
-    // 2) Normalize all the possible param names we might use
     const statusParam =
-      url.searchParams.get("paymentStatus") ||      // current
-      url.searchParams.get("payment_status") ||     // snake_case
+      url.searchParams.get("paymentStatus") ||
+      url.searchParams.get("payment_status") ||
       url.searchParams.get("status") ||
       url.searchParams.get("payment");
 
@@ -499,7 +545,6 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
           "Payment received. It may take a few seconds for your balance and history to update.",
       });
 
-      // Refresh dashboard data (charges + payments)
       loadDashboard();
     } else if (statusParam === "cancelled") {
       setBanner({
@@ -509,7 +554,6 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
       });
     }
 
-    // 3) Clean *all* of those params so refresh doesn't keep showing the banner
     url.searchParams.delete("paymentStatus");
     url.searchParams.delete("payment_status");
     url.searchParams.delete("status");
@@ -517,9 +561,9 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
     window.history.replaceState({}, "", url.toString());
   }, [loadDashboard]);
 
-  // ---------------------------------------------------------------------------
-  // Maintenance
-  // ---------------------------------------------------------------------------
+  /* --------------------------------------------------------------------- */
+  /* Maintenance                                                           */
+  /* --------------------------------------------------------------------- */
 
   const handleSubmitMaintenance = async (
     e: React.FormEvent
@@ -557,23 +601,22 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
     } catch (err: any) {
       setMaintenanceError(
         err.message ||
-          "Something went wrong submitting your request."
+        "Something went wrong submitting your request."
       );
     } finally {
       setMaintenanceSubmitting(false);
     }
   };
 
-  // ---------------------------------------------------------------------------
-  // Onboarding interactions
-  // ---------------------------------------------------------------------------
+  /* --------------------------------------------------------------------- */
+  /* Onboarding interactions                                               */
+  /* --------------------------------------------------------------------- */
 
   const toggleOnboardingStatus = async (item: OnboardingItem) => {
     const previousStatus = item.status;
     const nextStatus: OnboardingStatus =
       item.status === "completed" ? "pending" : "completed";
 
-    // Optimistic UI
     setOnboardingItems((prev) =>
       prev.map((i) =>
         i.id === item.id ? { ...i, status: nextStatus } : i
@@ -597,18 +640,13 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
         "Could not save this step yet. Please try again in a moment."
       );
     } else {
-      // Refresh status badge
       loadDashboard();
     }
   };
 
   const handleOnboardingItemClick = (item: OnboardingItem) => {
-    // Avoid double actions while an upload is in progress
-    if (uploading) {
-      return;
-    }
+    if (uploading) return;
 
-    // File-upload steps (allow replace)
     if (FILE_UPLOAD_CODES.has(item.code)) {
       if (item.status === "completed") {
         const shouldReplace = window.confirm(
@@ -621,14 +659,12 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
       setUploadStep(item);
 
       if (fileInputRef.current) {
-        // allow re-selecting the same file
         fileInputRef.current.value = "";
         fileInputRef.current.click();
       }
       return;
     }
 
-    // Move-in date step
     if (item.code === "confirm_move_in") {
       setEditingOnboardingItem(item);
       setOnboardingError(null);
@@ -636,7 +672,6 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
       return;
     }
 
-    // Other steps: simple toggle
     toggleOnboardingStatus(item);
   };
 
@@ -685,32 +720,29 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
     } catch (err: any) {
       setOnboardingError(
         err.message ||
-          "Could not save move-in date. Please try again."
+        "Could not save move-in date. Please try again."
       );
     } finally {
       setOnboardingSaving(false);
     }
   };
 
-  // ---------------------------------------------------------------------------
-  // File upload handler
-  // ---------------------------------------------------------------------------
+  /* --------------------------------------------------------------------- */
+  /* File upload                                                           */
+  /* --------------------------------------------------------------------- */
 
   const handleFileSelected = async (
     e: React.ChangeEvent<HTMLInputElement>
   ) => {
     const file = e.target.files?.[0];
-    if (!file || !uploadStep) {
-      return;
-    }
+    if (!file || !uploadStep) return;
 
-    // Basic client-side validation
     const allowedTypes = [
       "application/pdf",
       "image/jpeg",
       "image/png",
     ];
-    const maxBytes = 10 * 1024 * 1024; // 10 MB
+    const maxBytes = 10 * 1024 * 1024;
 
     if (!allowedTypes.includes(file.type) || file.size > maxBytes) {
       setUploadError(
@@ -724,7 +756,6 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
     setUploadError(null);
 
     try {
-      // Generate a safe, opaque path (do not expose the full original filename)
       const randomId =
         typeof crypto !== "undefined" && "randomUUID" in crypto
           ? (crypto as Crypto).randomUUID()
@@ -737,7 +768,6 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
 
       const path = `${user.id}/${uploadStep.code}/${randomId}${safeExt}`;
 
-      // 1) Upload to Storage
       const { error: uploadErr } = await supabase.storage
         .from("tenant-docs")
         .upload(path, file, { upsert: true });
@@ -750,7 +780,6 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
         return;
       }
 
-      // Shared payload for onboarding step
       const onboardingPayload: any = {
         status: "completed" as OnboardingStatus,
         data: {
@@ -760,7 +789,6 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
         completed_at: new Date().toISOString(),
       };
 
-      // 2) Insert into tenant_docs AND 3) update onboarding step in parallel
       const [
         { data: insertedDoc, error: insertErr },
         { error: onboardingErr },
@@ -804,10 +832,10 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
           prev.map((i) =>
             i.id === uploadStep.id
               ? {
-                  ...i,
-                  status: "completed",
-                  data: onboardingPayload.data,
-                }
+                ...i,
+                status: "completed",
+                data: onboardingPayload.data,
+              }
               : i
           )
         );
@@ -823,9 +851,9 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
     }
   };
 
-  // ---------------------------------------------------------------------------
-  // Payments – manual record + Stripe Checkout
-  // ---------------------------------------------------------------------------
+  /* --------------------------------------------------------------------- */
+  /* Payments                                                              */
+  /* --------------------------------------------------------------------- */
 
   const handleSaveManualPayment = async (
     e: React.FormEvent
@@ -843,10 +871,12 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
     setPaymentSaving(true);
 
     try {
+      const effectiveTenantId = user.id;
+
       const { error } = await supabase
         .from("payments")
         .insert({
-          tenant_id: user.id,
+          tenant_id: effectiveTenantId,
           amount,
           method: paymentMethod,
           note: paymentNote || null,
@@ -859,7 +889,6 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
       setPaymentNote("");
       setShowManualPaymentForm(false);
 
-      // Refresh payment list
       await loadDashboard();
     } catch (err: any) {
       setPaymentError(
@@ -873,9 +902,12 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
   const handleStripeCheckout = async () => {
     setStripeError(null);
 
-    if (!currentCharge || currentCharge.amount <= 0) {
+    // Use net balance as the amount to pay
+    const amountToPay = Math.max(overallBalance ?? 0, 0);
+
+    if (!amountToPay || amountToPay <= 0) {
       setStripeError(
-        "We couldn’t find a charge for this month. Please contact the property manager if this seems wrong."
+        "There is no outstanding balance to pay right now."
       );
       return;
     }
@@ -887,9 +919,9 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          chargeId: currentCharge.id,
           tenantId: user.id,
           email: user.email,
+          amountCents: Math.round(amountToPay * 100),
         }),
       });
 
@@ -903,22 +935,20 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
         throw new Error("Stripe did not return a checkout URL.");
       }
 
-      // Redirect to Stripe Checkout
       window.location.href = data.url;
     } catch (err: any) {
       console.error("Stripe checkout error", err);
       setStripeError(
-        err.message ||
-          "Could not start card payment. Please try again."
+        err.message || "Could not start card payment. Please try again."
       );
     } finally {
       setStripeLoading(false);
     }
   };
 
-  // ---------------------------------------------------------------------------
-  // Section renderer
-  // ---------------------------------------------------------------------------
+  /* --------------------------------------------------------------------- */
+  /* Section renderer                                                      */
+  /* --------------------------------------------------------------------- */
 
   const renderSectionContent = () => {
     if (activeSection === "Home") {
@@ -937,11 +967,10 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
-                className={`px-3 py-1 rounded-full ${
-                  activeTab === tab
-                    ? "bg-neutral-800 text-neutral-100"
-                    : "text-neutral-400 hover:text-neutral-100"
-                }`}
+                className={`px-3 py-1 rounded-full ${activeTab === tab
+                  ? "bg-neutral-800 text-neutral-100"
+                  : "text-neutral-400 hover:text-neutral-100"
+                  }`}
               >
                 {tab}
               </button>
@@ -1050,7 +1079,7 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
             </section>
           )}
 
-          {/* Onboarding checklist – only show if there are steps */}
+          {/* Onboarding checklist */}
           {onboardingItems.length > 0 && (
             <section className="mt-6 bg-neutral-900 border border-neutral-800 rounded-2xl p-4">
               <div className="flex items-center justify-between mb-3 text-xs">
@@ -1086,8 +1115,8 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
                   const badgeClasses = isCompleted
                     ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
                     : isPending
-                    ? "bg-neutral-800 text-neutral-300 border-neutral-700"
-                    : "bg-sky-500/20 text-sky-300 border-sky-500/40";
+                      ? "bg-neutral-800 text-neutral-300 border-neutral-700"
+                      : "bg-sky-500/20 text-sky-300 border-sky-500/40";
 
                   return (
                     <button
@@ -1129,26 +1158,23 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
       );
     }
 
-    // Other sections
+    /* ---------------------- Other sections ---------------------- */
 
     if (activeSection === "Payments") {
       return (
         <section className="mt-4 text-xs text-neutral-300 space-y-4">
           <h2 className="text-sm font-semibold">Payments</h2>
 
-          {/* Current month summary + actions */}
           <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-4 flex flex-col gap-3">
             <div className="flex items-center justify-between gap-4">
               <div>
                 <div className="text-xs text-neutral-400">
-                  Tenant Portion Due (this month)
+                  Current balance due
                 </div>
                 <div className="text-2xl font-bold">
                   {loading
                     ? "..."
-                    : amountDue === 0
-                    ? "$0.00"
-                    : `$${amountDue.toFixed(2)}`}
+                    : `$${(overallBalance ?? 0).toFixed(2)}`}
                 </div>
 
                 <div className="mt-3 text-xs text-neutral-300 space-y-1">
@@ -1162,24 +1188,16 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
                     </span>
                   </div>
                   <div>
-                    Your portion:{" "}
+                    Your portion (unpaid):{" "}
                     <span className="font-semibold text-neutral-100">
-                      $
-                      {section8?.tenant_portion
-                        ? section8.tenant_portion.toFixed(2)
-                        : amountDue.toFixed(2)}
+                      ${amountDue.toFixed(2)}
                     </span>
                   </div>
                   <div className="text-[11px] text-neutral-500">
                     Housing Authority pays their portion directly.
-                    This amount is what you owe.
+                    Your balance is based on all recorded charges and
+                    payments.
                   </div>
-                  {currentCharge?.description && (
-                    <div className="text-[11px] text-neutral-500">
-                      {currentCharge.description}
-                    </div>
-                  )}
-                  {/* NEW: show overall ledger balance */}
                   {overallBalance !== null && (
                     <div className="text-[11px] text-neutral-500">
                       Current balance (all months):{" "}
@@ -1210,15 +1228,9 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
                     {stripeLoading ? "Opening..." : "Pay with card"}
                   </button>
                 </div>
-                {autoPayEnabled ? (
-                  <span className="text-[11px] text-emerald-400">
-                    Autopay is enabled for your account.
-                  </span>
-                ) : (
-                  <span className="text-[11px] text-neutral-400">
-                    Autopay coming soon.
-                  </span>
-                )}
+                <span className="text-[11px] text-neutral-400">
+                  Autopay coming soon.
+                </span>
               </div>
             </div>
 
@@ -1353,8 +1365,8 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
                     <div className="text-neutral-500">
                       {p.created_at
                         ? new Date(
-                            p.created_at
-                          ).toLocaleDateString()
+                          p.created_at
+                        ).toLocaleDateString()
                         : ""}
                     </div>
                   </div>
@@ -1429,7 +1441,8 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
                 >
                   <div>
                     <div className="font-medium text-neutral-100">
-                      {DOC_LABELS[doc.doc_type ?? ""] ?? doc.doc_type ??
+                      {DOC_LABELS[doc.doc_type ?? ""] ??
+                        doc.doc_type ??
                         "Document"}
                     </div>
                     <div className="text-[11px] text-neutral-500">
@@ -1453,7 +1466,7 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
                             .from("tenant-docs")
                             .createSignedUrl(
                               doc.storage_path as string,
-                              600 // 10 minutes
+                              600
                             );
                         if (error || !data?.signedUrl) {
                           alert(
@@ -1461,7 +1474,6 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
                           );
                           return;
                         }
-                        // Navigate in the same tab for reliability
                         window.location.href = data.signedUrl;
                       }}
                     >
@@ -1537,9 +1549,9 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
     return null;
   };
 
-  // ---------------------------------------------------------------------------
-  // Render
-  // ---------------------------------------------------------------------------
+  /* --------------------------------------------------------------------- */
+  /* Render                                                                */
+  /* --------------------------------------------------------------------- */
 
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-50 flex">
@@ -1572,8 +1584,12 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
               key={item}
               onClick={() => {
                 if (item === "Lease & Documents") {
-                  const encodedName = encodeURIComponent(user.name ?? "");
-                  router.push(`/documents?tenantId=${user.id}&tenantName=${encodedName}`);   // 🔴 go to tenant upload page
+                  const encodedName = encodeURIComponent(
+                    user.name ?? ""
+                  );
+                  router.push(
+                    `/documents?tenantId=${user.id}&tenantName=${encodedName}`
+                  );
                   return;
                 }
 
@@ -1585,16 +1601,13 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
                   setLastQuickLink(null);
                 }
               }}
-              className={`w-full flex itemscenter gap-2 px-3 py-2 rounded-lg text-left ${
-                activeSection === item
-                  ? "bg-neutral-800 text-white"
-                  : "text-neutral-300 hover:bg-neutral-900 hover:text-white"
-              }`}
+              className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left ${activeSection === item
+                ? "bg-neutral-800 text-white"
+                : "text-neutral-300 hover:bg-neutral-900 hover:text-white"
+                }`}
             >
               <span className="w-1.5 h-1.5 rounded-full bg-transparent" />
               <span>{item}</span>
-              {item === "Messages & Alerts"
-              }
             </button>
           ))}
         </nav>
@@ -1616,7 +1629,7 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
 
       {/* Main */}
       <main className="flex-1 flex flex-col">
-        {/* Hidden file input for onboarding uploads */}
+        {/* Hidden file input */}
         <input
           ref={fileInputRef}
           type="file"
@@ -1644,14 +1657,13 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
         </header>
 
         <div className="flex-1 overflow-y-auto px-6 py-5 space-y-6">
-          {/* Optional banner (payment success / cancel) */}
+          {/* Payment status banner */}
           {banner && (
             <div
-              className={`text-[11px] px-3 py-2 rounded-lg border ${
-                banner.type === "success"
-                  ? "bg-emerald-950/40 border-emerald-600 text-emerald-300"
-                  : "bg-red-950/40 border-red-600 text-red-300"
-              }`}
+              className={`text-[11px] px-3 py-2 rounded-lg border ${banner.type === "success"
+                ? "bg-emerald-950/40 border-emerald-600 text-emerald-300"
+                : "bg-red-950/40 border-red-600 text-red-300"
+                }`}
             >
               {banner.message}
             </div>
@@ -1662,14 +1674,12 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
             <div className="flex items-center justify-between gap-4">
               <div>
                 <div className="text-xs text-neutral-400">
-                  Tenant Portion Due (this month)
+                  Current balance due
                 </div>
                 <div className="text-3xl font-bold">
                   {loading
                     ? "..."
-                    : amountDue === 0
-                    ? "$0.00"
-                    : `$${amountDue.toFixed(2)}`}
+                    : `$${(overallBalance ?? 0).toFixed(2)}`}
                 </div>
 
                 <div className="mt-3 text-xs text-neutral-300 space-y-1">
@@ -1683,19 +1693,16 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
                     </span>
                   </div>
                   <div>
-                    Your portion:{" "}
+                    Your portion (unpaid):{" "}
                     <span className="font-semibold text-neutral-100">
-                      $
-                      {section8?.tenant_portion
-                        ? section8.tenant_portion.toFixed(2)
-                        : amountDue.toFixed(2)}
+                      ${amountDue.toFixed(2)}
                     </span>
                   </div>
                   <div className="text-[11px] text-neutral-500">
                     Housing Authority pays their portion directly.
-                    This amount is what you owe.
+                    This amount is what you owe based on all recorded
+                    charges and payments.
                   </div>
-                  {/* NEW: ledger balance callout */}
                   {overallBalance !== null && (
                     <div className="text-[11px] text-neutral-500">
                       Current balance (all months):{" "}
@@ -1707,7 +1714,6 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
                   )}
                 </div>
 
-                {/* NEW: Optional error text if tenant_balances query failed */}
                 {balanceError && (
                   <div className="mt-2 text-[11px] text-red-400">
                     {balanceError}
@@ -1720,9 +1726,9 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
                   className="px-5 py-2.5 rounded-full bg-indigo-500 hover:bg-indigo-400 text-sm font-semibold"
                   onClick={() => setActiveSection("Payments")}
                 >
-                  {amountDue === 0
-                    ? "View Payment History"
-                    : "Pay or record payment"}
+                  {overallBalance && overallBalance > 0
+                    ? "Pay or record payment"
+                    : "View Payment History"}
                 </button>
                 <button className="text-[11px] text-neutral-400 underline underline-offset-2">
                   Set up autopay (coming soon)

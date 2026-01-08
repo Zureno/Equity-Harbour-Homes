@@ -30,7 +30,7 @@ export default function ResidentLoginPage() {
     }
 
     // After login, send them to tenant dashboard (adjust route as needed)
-    router.push("/dashboard");
+    router.push("/");
   };
 
   return (

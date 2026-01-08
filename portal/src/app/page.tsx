@@ -1,9 +1,9 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { supabase } from "../lib/supabaseClient";
-import LoginPage from "../components/LoginPage";
-import TenantPortal from "../components/TenantPortal";
+import { supabase } from "@/lib/supabaseClient";
+import LoginPage from "@/components/LoginPage";
+import TenantPortal from "@/components/TenantPortal";
 
 export type TenantUser = {
   id: string;
@@ -18,9 +18,9 @@ function mapTenantRowToUser(tenantRow: any, sessionUser: any): TenantUser {
     name:
       tenantRow.full_name ||
       sessionUser.user_metadata?.full_name ||
-      "",
+      null,
     email: tenantRow.email || sessionUser.email || "",
-    unit: tenantRow.unit_label || "Your Unit",
+    unit: tenantRow.unit_label || null,
   };
 }
 
@@ -36,36 +36,53 @@ export default function HomePage() {
     let cancelled = false;
 
     const init = async () => {
-      console.log("[HomePage] init start");
       try {
-        const { data, error } = await supabase.auth.getSession();
-        console.log("[HomePage] getSession:", { data, error });
+        const { data: sessionRes, error: sessionErr } =
+          await supabase.auth.getSession();
 
-        if (error) throw error;
-
-        const session = data?.session;
-
-        if (!session) {
+        if (sessionErr || !sessionRes?.session?.user) {
           if (!cancelled) setState({ status: "unauth" });
           return;
         }
 
+        const user = sessionRes.session.user;
+
+        if (!user.email) {
+          if (!cancelled) {
+            setState({
+              status: "unauth",
+              error:
+                "Your account is missing an email address. Please contact your landlord.",
+            });
+          }
+          return;
+        }
+
+        // Look up tenant by email only
         const { data: tenantRow, error: tenantError } = await supabase
           .from("tenants")
           .select("id, full_name, email, unit_label")
-          .eq("user_id", session.user.id)
-          .single();
+          .eq("email", user.email)
+          .maybeSingle();
 
-        console.log("[HomePage] tenantRow:", { tenantRow, tenantError });
-
-        if (tenantError) throw tenantError;
+        if (tenantError) {
+          console.error("[HomePage] tenant lookup error:", tenantError);
+          if (!cancelled) {
+            setState({
+              status: "unauth",
+              error:
+                "We couldn't load your portal. Please try signing in again.",
+            });
+          }
+          return;
+        }
 
         if (!tenantRow) {
           if (!cancelled) {
             setState({
               status: "unauth",
               error:
-                "We couldn't find a tenant record for this user. Please sign in again.",
+                "We couldn't find your resident profile. Ask your landlord to connect your login.",
             });
           }
           return;
@@ -74,24 +91,17 @@ export default function HomePage() {
         if (!cancelled) {
           setState({
             status: "ready",
-            tenant: mapTenantRowToUser(tenantRow, session.user),
+            tenant: mapTenantRowToUser(tenantRow, user),
           });
         }
-      } catch (err: any) {
+      } catch (err) {
         console.error("[HomePage] init error:", err);
-
         if (!cancelled) {
           setState({
             status: "unauth",
             error:
               "We couldn't load your portal. Please sign in again to continue.",
           });
-        }
-
-        try {
-          await supabase.auth.signOut();
-        } catch {
-          // ignore
         }
       }
     };

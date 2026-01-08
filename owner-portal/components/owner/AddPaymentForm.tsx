@@ -6,9 +6,10 @@ import { useRouter } from "next/navigation";
 
 type Props = {
   tenantId: string;
+  tenantName?: string; // optional – page can omit it
 };
 
-const AddPaymentForm: React.FC<Props> = ({ tenantId }) => {
+const AddPaymentForm: React.FC<Props> = ({ tenantId, tenantName }) => {
   const router = useRouter();
   const [amount, setAmount] = useState("");
   const [method, setMethod] = useState("Cash");
@@ -46,9 +47,7 @@ const AddPaymentForm: React.FC<Props> = ({ tenantId }) => {
         throw new Error(body?.error || "Failed to record payment.");
       }
 
-      setMessage(
-        "Payment recorded and applied to oldest unpaid charges."
-      );
+      setMessage("Payment recorded and applied to oldest unpaid charges.");
       setAmount("");
       setNote("");
 
@@ -63,7 +62,9 @@ const AddPaymentForm: React.FC<Props> = ({ tenantId }) => {
   return (
     <section className="bg-neutral-900 border border-neutral-800 rounded-2xl p-4 text-xs space-y-3">
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold">Record payment</h2>
+        <h2 className="text-sm font-semibold">
+          Record payment{tenantName ? ` for ${tenantName}` : ""}
+        </h2>
       </div>
 
       <form onSubmit={handleSubmit} className="space-y-3">

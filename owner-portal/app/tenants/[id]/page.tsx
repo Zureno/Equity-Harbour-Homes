@@ -1,8 +1,9 @@
-// app/tenants/[id]/page.tsx
+// owner-portal/app/tenants/[id]/page.tsx
 
 import { notFound } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { createServerClient } from "@/lib/supabaseServer";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 export const dynamic = "force-dynamic";
 
@@ -15,7 +16,8 @@ type PageProps = {
 async function createCharge(formData: FormData) {
   "use server";
 
-  const supabase = await createServerClient();
+  // Service-role client = bypass RLS for owner writes
+  const supabase = supabaseAdmin;
 
   const tenantId = formData.get("tenant_id") as string | null;
   const amount = Number(formData.get("amount") || 0);
@@ -38,6 +40,7 @@ async function createCharge(formData: FormData) {
     amount,
     description,
     due_date: dueDate,
+    type: "rent", // NOT NULL column
   });
 
   if (error) {
@@ -50,7 +53,8 @@ async function createCharge(formData: FormData) {
 async function recordPayment(formData: FormData) {
   "use server";
 
-  const supabase = await createServerClient();
+  // Service-role client for payments as well
+  const supabase = supabaseAdmin;
 
   const tenantId = formData.get("tenant_id") as string | null;
   const amount = Number(formData.get("amount") || 0);
@@ -71,7 +75,7 @@ async function recordPayment(formData: FormData) {
     amount,
     method,
     note,
-    // If you later add a paid_at column, you can also set it here.
+    // If you later add paid_at:
     // paid_at: new Date().toISOString(),
   });
 
@@ -85,16 +89,19 @@ async function recordPayment(formData: FormData) {
 /* ---------- Page component ---------- */
 
 export default async function TenantLedgerPage(props: PageProps) {
-  // In Next 16, params is a Promise
+  // In your setup, params is a Promise
   const { id: tenantId } = await props.params;
 
-  const supabase = await createServerClient();
+  // RLS-aware client for tenant metadata
+  const supabaseRls = await createServerClient();
+  // Service-role client for ledger data (charges / payments)
+  const admin = supabaseAdmin;
 
   // 1) Load tenant
   const {
     data: tenant,
     error: tenantError,
-  } = await supabase
+  } = await supabaseRls
     .from("tenants")
     .select("id, full_name, email, unit_label")
     .eq("id", tenantId)
@@ -109,11 +116,11 @@ export default async function TenantLedgerPage(props: PageProps) {
     notFound();
   }
 
-  // 2) Load charges
+  // 2) Load charges (use service-role so owner can see everything)
   const {
     data: rawCharges,
     error: chargesError,
-  } = await supabase
+  } = await admin
     .from("charges")
     .select("id, amount, description, due_date, created_at")
     .eq("tenant_id", tenantId)
@@ -123,14 +130,13 @@ export default async function TenantLedgerPage(props: PageProps) {
     console.error("[TenantLedgerPage] charges fetch error:", chargesError);
   }
 
-  // Make sure we always have arrays, never null
   const charges = (rawCharges ?? []) as any[];
 
-  // 3) Load payments (✅ changed to use created_at only)
+  // 3) Load payments (also via service-role)
   const {
     data: rawPayments,
     error: paymentsError,
-  } = await supabase
+  } = await admin
     .from("payments")
     .select("id, amount, method, note, created_at")
     .eq("tenant_id", tenantId)

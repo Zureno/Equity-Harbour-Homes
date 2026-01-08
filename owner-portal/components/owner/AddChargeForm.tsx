@@ -30,30 +30,33 @@ const AddChargeForm: React.FC<Props> = ({ tenantId }) => {
 
     setSubmitting(true);
     try {
-      const res = await fetch("/api/owner/add-charge", {
+      // 🔑 Call the server route that uses supabaseAdmin
+      const res = await fetch(`/tenants/${tenantId}/charges`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          tenantId,
           amount: parsed,
           description,
-          dueDate: dueDate || null,
+          // match DB column name
+          due_date: dueDate || null,
         }),
       });
 
       if (!res.ok) {
         const body = await res.json().catch(() => null);
+        console.error("[AddChargeForm] API error:", body);
         throw new Error(body?.error || "Failed to create charge.");
       }
 
       setMessage("Charge created.");
       setAmount("");
       setDescription("Monthly rent");
-      // leave due date as-is so you can add multiple quickly
+      // keep dueDate so you can add multiple quickly with same date
 
       router.refresh();
     } catch (err: any) {
-      setError(err.message || "Something went wrong.");
+      console.error("[AddChargeForm] Submit error:", err);
+      setError(err?.message || "Something went wrong.");
     } finally {
       setSubmitting(false);
     }

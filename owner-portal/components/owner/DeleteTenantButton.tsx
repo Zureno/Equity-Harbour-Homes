@@ -8,14 +8,16 @@ export default function DeleteTenantButton({
   tenantName,
 }: {
   tenantId: string;
-  tenantName: string;
+  tenantName?: string; // 👈 make this optional
 }) {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
 
   const handleDelete = async () => {
+    const label = tenantName ? `"${tenantName}"` : "this tenant";
+
     const ok = window.confirm(
-      `Delete tenant "${tenantName}" and all related data? This cannot be undone.`
+      `Delete tenant ${label} and all related data? This cannot be undone.`
     );
     if (!ok) return;
 

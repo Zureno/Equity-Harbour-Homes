@@ -2,52 +2,42 @@
 import { supabase } from "./supabaseClient";
 
 export type TenantBalance = {
-  currentBalance: number;   // charges - payments
-  amountDue: number;        // never negative (credits become 0)
+  tenantId: string;
+  amountDue: number;
 };
 
-/**
- * Compute the current balance for a tenant based on:
- *   - charges table
- *   - payments table (only status='paid')
- */
-export async function getTenantBalance(
-  tenantId: string
-): Promise<TenantBalance> {
-  // 1) All charges for this tenant
-  const { data: charges, error: chargesError } = await supabase
-    .from("charges")
-    .select("amount")
-    .eq("tenant_id", tenantId);
+export async function getCurrentUserBalance(): Promise<TenantBalance | null> {
+  const {
+    data: { user },
+    error: userError,
+  } = await supabase.auth.getUser();
 
-  if (chargesError) {
-    console.error("[getTenantBalance] chargesError", chargesError);
-    throw chargesError;
+  if (userError) {
+    console.error("[tenantBalance] getUser error", userError);
+    throw userError;
   }
 
-  // 2) All *paid* payments for this tenant
-  const { data: payments, error: paymentsError } = await supabase
-    .from("payments")
-    .select("amount, status")
-    .eq("tenant_id", tenantId)
-    .eq("status", "paid");
-
-  if (paymentsError) {
-    console.error("[getTenantBalance] paymentsError", paymentsError);
-    throw paymentsError;
+  if (!user) {
+    return null;
   }
 
-  const chargesTotal =
-    charges?.reduce((sum, row) => sum + (row.amount ?? 0), 0) ?? 0;
+  const { data, error } = await supabase
+    .from("tenant_balances_view")
+    .select("current_balance")
+    .eq("tenant_id", user.id)
+    .maybeSingle();
 
-  const paymentsTotal =
-    payments?.reduce((sum, row) => sum + (row.amount ?? 0), 0) ?? 0;
+  if (error) {
+    console.error("[tenantBalance] balance query error", error);
+    throw error;
+  }
 
-  const currentBalance = chargesTotal - paymentsTotal;
-  const amountDue = currentBalance > 0 ? currentBalance : 0;
+  const raw = data?.current_balance ?? 0;
 
   return {
-    currentBalance,
-    amountDue,
+    tenantId: user.id,
+    amountDue: Number(raw) || 0,
   };
 }
+
+export const getTenantBalance = getCurrentUserBalance;

@@ -1,12 +1,20 @@
 // src/app/api/owner/add-payment/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { supabaseAdmin } from "../../../../lib/supabaseAdmin";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 export const dynamic = "force-dynamic";
 
+type AddPaymentBody = {
+  tenantId: string;
+  amount: number;
+  method?: string;
+  note?: string | null;
+};
+
 export async function POST(req: NextRequest) {
   try {
-    const { tenantId, amount, method, note } = await req.json();
+    const { tenantId, amount, method, note } =
+      (await req.json()) as AddPaymentBody;
 
     if (!tenantId || amount == null) {
       return NextResponse.json(
@@ -23,7 +31,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 1) Insert payment row
+    // 1) Insert payment row (service-role, bypasses RLS)
     const { error: payError } = await supabaseAdmin.from("payments").insert({
       tenant_id: tenantId,
       amount: parsedAmount,
@@ -40,7 +48,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 2) Apply payment to oldest unpaid charges
+    // 2) Apply payment to oldest unpaid charges (also via service-role)
     let remaining = parsedAmount;
 
     const { data: charges, error: chargesError } = await supabaseAdmin
@@ -52,7 +60,7 @@ export async function POST(req: NextRequest) {
 
     if (chargesError) {
       console.error("[add-payment] fetch charges error:", chargesError);
-      // still return success for payment itself
+      // Payment is saved; we just couldn't apply it to charges.
       return NextResponse.json(
         {
           ok: true,
@@ -64,7 +72,8 @@ export async function POST(req: NextRequest) {
 
     for (const c of charges || []) {
       if (remaining <= 0) break;
-      const chargeAmount = Number(c.amount || 0);
+
+      const chargeAmount = Number(c.amount ?? 0);
       if (!Number.isFinite(chargeAmount) || chargeAmount <= 0) continue;
 
       if (remaining >= chargeAmount) {
@@ -74,16 +83,13 @@ export async function POST(req: NextRequest) {
           .eq("id", c.id);
 
         if (updateErr) {
-          console.error(
-            "[add-payment] update charge error:",
-            updateErr
-          );
+          console.error("[add-payment] update charge error:", updateErr);
           continue;
         }
 
         remaining -= chargeAmount;
       } else {
-        // partial leftover; we leave remaining > 0 as "unapplied" for now
+        // Partial leftover – leave remaining as unapplied for now.
         break;
       }
     }
