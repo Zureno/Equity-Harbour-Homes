@@ -4,10 +4,12 @@ import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 export async function POST(
   req: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const tenantId = params.id;
+    // ✅ Next 16 expects params as a Promise here
+    const { id: tenantId } = await params;
+
     const { amount, description, due_date } = await req.json();
 
     const { data, error } = await supabaseAdmin
