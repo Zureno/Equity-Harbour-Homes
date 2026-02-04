@@ -57,7 +57,10 @@ type PaymentRow = {
   amount: number;
   method: string | null;
   note: string | null;
+  status?: "pending" | "posted" | "rejected" | null;
+  source?: "stripe" | "owner_recorded" | "tenant_reported" | string | null;
   created_at: string | null;
+  posted_at?: string | null;
 };
 
 type CurrentCharge = {
@@ -152,6 +155,16 @@ const DOC_LABELS: Record<string, string> = {
   sign_lease: "Signed lease",
 };
 
+// Human labels for payment methods
+const PAYMENT_METHOD_LABELS: Record<string, string> = {
+  money_order: "Money order",
+  cash: "Cash",
+  cashier_check: "Cashier’s check",
+  zelle: "Zelle",
+  venmo: "Venmo",
+  other: "Other",
+};
+
 /* ------------------------------------------------------------------------- */
 /* Component                                                                 */
 /* ------------------------------------------------------------------------- */
@@ -160,8 +173,8 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
   const router = useRouter();
 
   // Navigation
-  const [activeSection, setActiveSection] =
-    useState<MainSection>("Home");
+  const [activeSection, setActiveSection] = useState<MainSection>("Home");
+  const [resolvedTenantId, setResolvedTenantId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TopTab>("Quick Links");
   const [lastQuickLink, setLastQuickLink] = useState<string | null>(
     null
@@ -169,16 +182,14 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
 
   // Top card / Section 8 / charges
   const [amountDue, setAmountDue] = useState<number>(0);
-  const [currentCharge, setCurrentCharge] =
-    useState<CurrentCharge | null>(null);
+  const [currentCharge, setCurrentCharge] = useState<CurrentCharge | null>(null);
   const [section8, setSection8] = useState<Section8Case | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
 
   // Overall ledger balance (live from charges & payments)
-  const [overallBalance, setOverallBalance] =
-    useState<number | null>(null);
-  const [balanceError, setBalanceError] =
-    useState<string | null>(null);
+  const [overallBalance, setOverallBalance] = useState<number | null>(null);
+  const [balanceError, setBalanceError] = useState<string | null>(null);
+  const [resolvedUnitLabel, setResolvedUnitLabel] = useState<string | null>(null);
 
   // Onboarding
   const [onboardingItems, setOnboardingItems] = useState<
@@ -225,22 +236,17 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
     useState<string | null>(null);
   const [uploadingId, setUploadingId] = useState<string | null>(null);
 
-  // Payments
-  const [showManualPaymentForm, setShowManualPaymentForm] =
-    useState(false);
+  // Payments (Tenant can REPORT only)
+  const [showReportPaymentForm, setShowReportPaymentForm] = useState(false);
   const [paymentAmount, setPaymentAmount] = useState<string>("");
-  const [paymentMethod, setPaymentMethod] =
-    useState<string>("Online portal");
+  const [paymentMethod, setPaymentMethod] = useState<string>("money_order");
   const [paymentNote, setPaymentNote] = useState<string>("");
   const [paymentSaving, setPaymentSaving] = useState(false);
-  const [paymentError, setPaymentError] =
-    useState<string | null>(null);
-  const [paymentMessage, setPaymentMessage] =
-    useState<string | null>(null);
+  const [paymentError, setPaymentError] = useState<string | null>(null);
+  const [paymentMessage, setPaymentMessage] = useState<string | null>(null);
   const [payments, setPayments] = useState<PaymentRow[]>([]);
   const [stripeLoading, setStripeLoading] = useState(false);
-  const [stripeError, setStripeError] =
-    useState<string | null>(null);
+  const [stripeError, setStripeError] = useState<string | null>(null);
 
   // Banner for payment success / cancel
   const [banner, setBanner] = useState<{
@@ -255,262 +261,142 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
   /* --------------------------------------------------------------------- */
 
   const loadDashboard = useCallback(async () => {
-    setLoading(true);
-    setBalanceError(null);
+  setLoading(true);
+  setBalanceError(null);
 
-    try {
-      const tenantId = user.id;
-      console.log("[TenantPortal] loadDashboard for tenant", tenantId);
+  try {
+    // 1) Resolve tenant.id using email (AUTH ID ≠ BUSINESS ID)
+    const { data: tenantRow, error: tenantErr } = await supabase
+      .from("tenants")
+      .select("id, unit_label")
+      .eq("email", user.email)
+      .maybeSingle();
 
-      /* ------------------------------------------------------------------- */
-      /* 1) OVERALL BALANCE – same view as owner portal                      */
-      /* ------------------------------------------------------------------- */
-
-      const { data: balanceRow, error: balanceErr } = await supabase
-        .from("tenant_balances_view")
-        .select("current_balance")
-        .eq("tenant_id", tenantId)
-        .maybeSingle();
-
-      if (balanceErr) {
-        console.error("[TenantPortal] balance error", balanceErr);
-        throw balanceErr;
-      }
-
-      const currentBalance = Number(balanceRow?.current_balance ?? 0);
-      console.log("[TenantPortal] current_balance", currentBalance);
-      setOverallBalance(currentBalance);
-
-      // Use net balance as the tenant's unpaid portion
-      const unpaidPortion = Math.max(currentBalance, 0);
-      setAmountDue(unpaidPortion);
-
-      /* ------------------------------------------------------------------- */
-      /* 2) SECTION 8 INFO                                                   */
-      /* ------------------------------------------------------------------- */
-
-      const { data: s8 } = await supabase
-        .from("section8_cases")
-        .select(
-          "hap_amount, tenant_portion, next_inspection_date, next_recertification_date, housing_authority_name, caseworker_name, caseworker_email"
-        )
-        .eq("tenant_id", tenantId)
-        .maybeSingle();
-
-      if (s8) {
-        setSection8({
-          hap_amount: s8.hap_amount,
-          tenant_portion: s8.tenant_portion,
-          next_inspection_date: s8.next_inspection_date,
-          next_recertification_date: s8.next_recertification_date,
-          housing_authority_name: s8.housing_authority_name,
-          caseworker_name: s8.caseworker_name,
-          caseworker_email: s8.caseworker_email,
-        });
-      } else {
-        setSection8(null);
-      }
-
-      /* ------------------------------------------------------------------- */
-      /* 3) UNPAID CHARGES (FOR STRIPE)                                      */
-      /*    Try tenant_charges first, then fall back to charges              */
-      /* ------------------------------------------------------------------- */
-
-      let unpaidCharges: any[] | null = null;
-
-      // 3a) tenant_charges with amount_cents
-      const { data: tenantCharges, error: tenantChargesErr } = await supabase
-        .from("tenant_charges")
-        .select("id, amount_cents, description, due_date, is_paid")
-        .eq("tenant_id", tenantId)
-        .or("is_paid.is.null,is_paid.eq.false")
-        .order("due_date", { ascending: true });
-
-      console.log("[TenantPortal] tenant_charges query result", {
-        tenantCharges,
-        tenantChargesErr,
-      });
-
-      if (tenantChargesErr) {
-        console.error(
-          "[TenantPortal] tenant_charges error (non-fatal)",
-          tenantChargesErr
-        );
-      }
-
-      if (tenantCharges && tenantCharges.length > 0) {
-        unpaidCharges = tenantCharges.map((c: any) => ({
-          id: c.id,
-          amountDollars: Number(c.amount_cents || 0) / 100,
-          description: c.description ?? null,
-          due_date: c.due_date,
-        }));
-      }
-
-      // 3b) Fallback: charges with amount in dollars
-      if (!unpaidCharges || unpaidCharges.length === 0) {
-        const { data: simpleCharges, error: simpleErr } = await supabase
-          .from("charges")
-          .select("id, amount, description, due_date, is_paid, tenant_id")
-          .eq("tenant_id", tenantId)
-          .or("is_paid.is.null,is_paid.eq.false")
-          .order("due_date", { ascending: true });
-
-        console.log("[TenantPortal] charges (fallback) query result", {
-          simpleCharges,
-          simpleErr,
-        });
-
-        if (simpleErr) {
-          console.error("[TenantPortal] charges fallback error", simpleErr);
-        }
-
-        if (simpleCharges && simpleCharges.length > 0) {
-          unpaidCharges = simpleCharges.map((c: any) => ({
-            id: c.id,
-            amountDollars: Number(c.amount || 0),
-            description: c.description ?? null,
-            due_date: c.due_date,
-          }));
-        }
-      }
-
-      // IMPORTANT: we only use unpaidCharges to pick a currentCharge for Stripe,
-      // not to calculate the displayed "Your portion (unpaid)".
-      if (unpaidCharges && unpaidCharges.length > 0) {
-        const first = unpaidCharges[0];
-        setCurrentCharge({
-          id: first.id,
-          amount: first.amountDollars,
-          description: first.description,
-          due_date: first.due_date,
-        });
-
-        console.log("[TenantPortal] currentCharge set to", first);
-      } else {
-        console.log("[TenantPortal] no unpaid charges found in either table");
-        setCurrentCharge(null);
-      }
-
-      /* ------------------------------------------------------------------- */
-      /* 4) ONBOARDING ITEMS                                                 */
-      /* ------------------------------------------------------------------- */
-
-      const { data: onboardingRows, error: onboardingErr } = await supabase
-        .from("tenant_onboarding")
-        .select(
-          `
-        id,
-        tenant_id,
-        step_id,
-        status,
-        data,
-        onboarding_steps (
-          id,
-          code,
-          title,
-          sort_order
-        )
-      `
-        )
-        .eq("tenant_id", tenantId);
-
-      console.log("[TenantPortal] tenant_onboarding raw", {
-        rows: onboardingRows,
-        onboardingErr,
-      });
-
-      let list: OnboardingItem[] = [];
-
-      if (onboardingRows && onboardingRows.length > 0) {
-        list = (onboardingRows as any[])
-          .map((row) => {
-            const step = row.onboarding_steps;
-            if (!step) return null;
-
-            const item: OnboardingItem = {
-              id: row.id as string,
-              step_id: row.step_id as string,
-              code: step.code as string,
-              title: step.title as string,
-              status: (row.status || "pending") as OnboardingStatus,
-              sort_order: (step.sort_order as number) ?? 0,
-              data: row.data ?? null,
-            };
-            return item;
-          })
-          .filter((x): x is OnboardingItem => x !== null)
-          .sort((a, b) => a.sort_order - b.sort_order);
-      }
-
-      setOnboardingItems(list);
-
-      let derivedStatus: string | null = null;
-      if (list.length === 0) {
-        derivedStatus = null;
-      } else if (list.every((i) => i.status === "completed")) {
-        derivedStatus = "active";
-      } else if (
-        list.some((i) => i.status === "in_progress" || i.status === "completed")
-      ) {
-        derivedStatus = "in_progress";
-      } else {
-        derivedStatus = "pending";
-      }
-
-      setOnboardingStatus(derivedStatus);
-
-      if (derivedStatus !== null) {
-        await supabase
-          .from("tenants")
-          .update({ onboarding_status: derivedStatus })
-          .eq("id", tenantId);
-      }
-
-      /* ------------------------------------------------------------------- */
-      /* 5) DOCUMENTS                                                        */
-      /* ------------------------------------------------------------------- */
-
-      const { data: docRows, error: docErr } = await supabase
-        .from("tenant_docs")
-        .select("*")
-        .eq("tenant_id", tenantId)
-        .order("created_at", { ascending: false });
-
-      if (docErr) {
-        console.error("tenant_docs error", docErr);
-        setDocsError("Could not load documents yet.");
-        setDocs([]);
-      } else if (docRows) {
-        setDocs(docRows as TenantDoc[]);
-        setDocsError(null);
-      }
-
-      /* ------------------------------------------------------------------- */
-      /* 6) PAYMENT HISTORY                                                  */
-      /* ------------------------------------------------------------------- */
-
-      const { data: paymentRows, error: payErr } = await supabase
-        .from("payments")
-        .select("id, tenant_id, amount, method, note, created_at")
-        .eq("tenant_id", tenantId)
-        .order("created_at", { ascending: false });
-
-      if (payErr) {
-        console.error("payments error", payErr);
-        setPayments([]);
-      } else if (paymentRows) {
-        setPayments(paymentRows as PaymentRow[]);
-      }
-    } catch (err: any) {
-      console.error("[TenantPortal] loadDashboard error", err);
-      setBalanceError(
-        "We couldn't load your latest balance yet. Amounts may be slightly out of date."
-      );
-    } finally {
-      setLoading(false);
+    if (tenantErr) {
+      console.error("[TenantPortal] tenant lookup error", tenantErr);
+      throw tenantErr;
     }
-  }, [user.id]);
+
+    if (!tenantRow?.id) {
+      console.error("[TenantPortal] tenant record not found for email", user.email);
+      throw new Error("Tenant record not found");
+    }
+
+    // IMPORTANT: tenantRow.id is the correct business tenant id
+    const tenantId = tenantRow.id;
+    setResolvedTenantId(tenantId);
+    setResolvedUnitLabel(tenantRow.unit_label ?? null);
+
+    console.log("[TenantPortal] resolved tenantId =", tenantId);
+
+    // 2) BALANCE (VIEW) - source of truth (should already be posted-only)
+    const { data: balanceRow, error: balanceErr } = await supabase
+      .from("tenant_balances_view")
+      .select("current_balance, total_charges, total_payments")
+      .eq("tenant_id", tenantId)
+      .maybeSingle();
+
+    if (balanceErr) {
+      console.error("[TenantPortal] balance view error", balanceErr);
+      throw balanceErr;
+    }
+
+    const currentBalance = Number(balanceRow?.current_balance ?? 0);
+    setOverallBalance(currentBalance);
+    setAmountDue(Math.max(currentBalance, 0));
+
+    // 3) SECTION 8
+    const { data: s8, error: s8Err } = await supabase
+      .from("section8_cases")
+      .select("*")
+      .eq("tenant_id", tenantId)
+      .maybeSingle();
+
+    if (s8Err) console.error("[TenantPortal] section8_cases error", s8Err);
+    setSection8(s8 ?? null);
+
+    // 4) UNPAID CHARGE (earliest due unpaid)
+    const { data: unpaid, error: unpaidErr } = await supabase
+      .from("charges")
+      .select("id, amount, description, due_date, is_paid")
+      .eq("tenant_id", tenantId)
+      .or("is_paid.is.null,is_paid.eq.false")
+      .order("due_date", { ascending: true })
+      .limit(1);
+
+    if (unpaidErr) console.error("[TenantPortal] unpaid charge error", unpaidErr);
+
+    setCurrentCharge(
+      unpaid?.[0]
+        ? {
+            id: unpaid[0].id,
+            amount: Number(unpaid[0].amount || 0),
+            description: unpaid[0].description ?? null,
+            due_date: unpaid[0].due_date,
+          }
+        : null
+    );
+
+    // 5) ONBOARDING
+    const { data: onboardingRows, error: onboardingErr } = await supabase
+      .from("tenant_onboarding")
+      .select(
+        `id, step_id, status, data,
+         onboarding_steps(id, code, title, sort_order)`
+      )
+      .eq("tenant_id", tenantId);
+
+    if (onboardingErr) console.error("[TenantPortal] onboarding error", onboardingErr);
+
+    setOnboardingItems(
+      (onboardingRows ?? [])
+        .map((r: any) => ({
+          id: r.id,
+          step_id: r.step_id,
+          code: r.onboarding_steps?.code,
+          title: r.onboarding_steps?.title,
+          status: r.status ?? "unknown",
+          sort_order: r.onboarding_steps?.sort_order ?? 999,
+          data: r.data,
+        }))
+        .sort((a, b) => a.sort_order - b.sort_order)
+    );
+
+    // 6) DOCS
+    const { data: docs, error: docsErr } = await supabase
+      .from("tenant_docs")
+      .select("*")
+      .eq("tenant_id", tenantId)
+      .order("created_at", { ascending: false });
+
+    if (docsErr) console.error("[TenantPortal] docs error", docsErr);
+    setDocs(docs ?? []);
+
+    // 7) PAYMENTS (normalize status so NULL doesn't break logic/UI)
+    const { data: paymentsRaw, error: payErr } = await supabase
+      .from("payments")
+      .select("id, amount, method, note, status, source, created_at, posted_at")
+      .eq("tenant_id", tenantId)
+      .order("created_at", { ascending: false });
+
+    if (payErr) console.error("[TenantPortal] payments error", payErr);
+
+    const normalizedPayments =
+      (paymentsRaw ?? []).map((p: any) => ({
+        ...p,
+        // If you previously had NULL status rows, treat them as "posted" (legacy behavior)
+        status: p.status ?? "posted",
+      })) ?? [];
+
+    setPayments(normalizedPayments);
+  } catch (err) {
+    console.error("[TenantPortal] loadDashboard failed", err);
+    setBalanceError("Unable to load dashboard.");
+  } finally {
+    setLoading(false);
+  }
+}, [user.email, user.id]);
+
 
   useEffect(() => {
     loadDashboard();
@@ -520,46 +406,44 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
   /* Handle Stripe redirect params                                         */
   /* --------------------------------------------------------------------- */
 
-  useEffect(() => {
-    if (typeof window === "undefined") return;
+// Handle Stripe redirect params (safe parsing)
+useEffect(() => {
+  if (typeof window === "undefined") return;
 
-    const url = new URL(window.location.href);
+  const url = new URL(window.location.href);
 
-    const tab = url.searchParams.get("tab");
-    if (tab === "payments") {
-      setActiveSection("Payments");
-    }
+  const tab = url.searchParams.get("tab");
+  const paymentStatus = url.searchParams.get("paymentStatus");
 
-    const statusParam =
-      url.searchParams.get("paymentStatus") ||
-      url.searchParams.get("payment_status") ||
-      url.searchParams.get("status") ||
-      url.searchParams.get("payment");
+  // ✅ tab is a MainSection (Payments, Home, etc)
+  if (tab && (menuItems as string[]).includes(tab)) {
+    setActiveSection(tab as MainSection);
+  }
 
-    if (!statusParam) return;
+  if (paymentStatus === "success") {
+    setBanner({
+      type: "success",
+      message:
+        "Payment received. It may take a few seconds for your balance and history to update.",
+    });
 
-    if (statusParam === "success") {
-      setBanner({
-        type: "success",
-        message:
-          "Payment received. It may take a few seconds for your balance and history to update.",
-      });
+    loadDashboard();
 
-      loadDashboard();
-    } else if (statusParam === "cancelled") {
-      setBanner({
-        type: "error",
-        message:
-          "Card payment cancelled. No money was taken. You can try again anytime.",
-      });
-    }
+    window.setTimeout(() => setBanner(null), 4000);
+  }
 
+  if (paymentStatus === "cancel") {
+    setBanner({ type: "error", message: "Payment canceled." });
+    window.setTimeout(() => setBanner(null), 4000);
+  }
+
+  // Clean up URL
+  if (tab || paymentStatus) {
+    url.searchParams.delete("tab");
     url.searchParams.delete("paymentStatus");
-    url.searchParams.delete("payment_status");
-    url.searchParams.delete("status");
-    url.searchParams.delete("payment");
     window.history.replaceState({}, "", url.toString());
-  }, [loadDashboard]);
+  }
+}, [loadDashboard]);
 
   /* --------------------------------------------------------------------- */
   /* Maintenance                                                           */
@@ -583,7 +467,7 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
       const { error } = await supabase
         .from("maintenance_requests")
         .insert({
-          tenant_id: user.id,
+          tenant_id: resolvedTenantId!,
           title: maintenanceTitle.trim(),
           description: maintenanceDescription.trim(),
           priority: maintenancePriority,
@@ -627,7 +511,7 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
       .from("tenant_onboarding")
       .update({ status: nextStatus })
       .eq("id", item.id)
-      .eq("tenant_id", user.id);
+      .eq("tenant_id", resolvedTenantId ?? user.id);
 
     if (error) {
       console.error("toggle onboarding error", error);
@@ -703,7 +587,7 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
         .from("tenant_onboarding")
         .update(payload)
         .eq("id", editingOnboardingItem.id)
-        .eq("tenant_id", user.id);
+        .eq("tenant_id", resolvedTenantId!);
 
       if (error) throw error;
 
@@ -796,7 +680,7 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
         supabase
           .from("tenant_docs")
           .insert({
-            tenant_id: user.id,
+            tenant_id: resolvedTenantId!,
             doc_type: uploadStep.code,
             file_name: file.name,
             storage_path: path,
@@ -855,9 +739,7 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
   /* Payments                                                              */
   /* --------------------------------------------------------------------- */
 
-  const handleSaveManualPayment = async (
-    e: React.FormEvent
-  ) => {
+  const handleSubmitReportedPayment = async (e: React.FormEvent) => {
     e.preventDefault();
     setPaymentError(null);
     setPaymentMessage(null);
@@ -873,26 +755,29 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
     try {
       const effectiveTenantId = user.id;
 
-      const { error } = await supabase
-        .from("payments")
-        .insert({
-          tenant_id: effectiveTenantId,
-          amount,
-          method: paymentMethod,
-          note: paymentNote || null,
-        });
+      // TENANT RULE: tenant can only REPORT payments, never POST ledger entries.
+      const { error } = await supabase.from("payments").insert({
+        tenant_id: effectiveTenantId,
+        amount,
+        method: paymentMethod,
+        note: paymentNote || null,
+        status: "pending",
+        source: "tenant_reported",
+      });
 
       if (error) throw error;
 
-      setPaymentMessage("Payment recorded.");
+      setPaymentMessage(
+        "Payment reported. It will be applied once the owner verifies and posts it."
+      );
       setPaymentAmount("");
       setPaymentNote("");
-      setShowManualPaymentForm(false);
+      setShowReportPaymentForm(false);
 
       await loadDashboard();
     } catch (err: any) {
       setPaymentError(
-        err.message || "Could not save payment. Please try again."
+        err.message || "Could not submit payment report. Please try again."
       );
     } finally {
       setPaymentSaving(false);
@@ -900,51 +785,47 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
   };
 
   const handleStripeCheckout = async () => {
-    setStripeError(null);
+  setStripeError(null);
 
-    // Use net balance as the amount to pay
-    const amountToPay = Math.max(overallBalance ?? 0, 0);
+  // Always pay the live ledger balance
+  const amountToPay = Math.max(overallBalance ?? 0, 0);
 
-    if (!amountToPay || amountToPay <= 0) {
-      setStripeError(
-        "There is no outstanding balance to pay right now."
-      );
-      return;
+  if (!amountToPay || amountToPay <= 0) {
+    setStripeError("There is no outstanding balance to pay right now.");
+    return;
+  }
+
+  setStripeLoading(true);
+
+  try {
+    const res = await fetch("/api/create-checkout-session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tenantId: resolvedTenantId,           // IMPORTANT: business tenant id
+        email: user.email,                    // for Stripe receipt
+        amountCents: Math.round(amountToPay * 100),
+        returnTab: "Payments"                 // 👈 tells backend where to send user back
+      }),
+    });
+
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      throw new Error(body?.error || "Unable to start checkout.");
     }
 
-    setStripeLoading(true);
+    const data = await res.json();
+    if (!data?.url) throw new Error("Stripe did not return a checkout URL.");
 
-    try {
-      const res = await fetch("/api/create-checkout-session", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          tenantId: user.id,
-          email: user.email,
-          amountCents: Math.round(amountToPay * 100),
-        }),
-      });
-
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(body?.error || "Unable to start checkout.");
-      }
-
-      const data = await res.json();
-      if (!data?.url) {
-        throw new Error("Stripe did not return a checkout URL.");
-      }
-
-      window.location.href = data.url;
-    } catch (err: any) {
-      console.error("Stripe checkout error", err);
-      setStripeError(
-        err.message || "Could not start card payment. Please try again."
-      );
-    } finally {
-      setStripeLoading(false);
-    }
-  };
+    // Redirect to Stripe
+    window.location.href = data.url;
+  } catch (err: any) {
+    console.error("Stripe checkout error", err);
+    setStripeError(err.message || "Could not start card payment.");
+  } finally {
+    setStripeLoading(false);
+  }
+};
 
   /* --------------------------------------------------------------------- */
   /* Section renderer                                                      */
@@ -1214,11 +1095,9 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
                 <div className="flex gap-2">
                   <button
                     className="px-4 py-2 rounded-full bg-neutral-800 hover:bg-neutral-700 text-xs font-semibold"
-                    onClick={() =>
-                      setShowManualPaymentForm((v) => !v)
-                    }
+                    onClick={() => setShowReportPaymentForm((v) => !v)}
                   >
-                    Record a payment
+                    Report a payment
                   </button>
                   <button
                     className="px-4 py-2 rounded-full bg-indigo-500 hover:bg-indigo-400 text-xs font-semibold disabled:opacity-60"
@@ -1242,16 +1121,16 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
           </div>
 
           {/* Manual payment form */}
-          {showManualPaymentForm && (
+          {showReportPaymentForm && (
             <section className="bg-neutral-900 border border-neutral-800 rounded-2xl p-4 max-w-xl">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-sm font-semibold">
-                  Record a payment
+                  Report a payment (pending)
                 </h3>
                 <button
                   type="button"
                   onClick={() =>
-                    setShowManualPaymentForm(false)
+                    setShowReportPaymentForm(false)
                   }
                   className="text-[11px] text-neutral-400 hover:text-neutral-200"
                 >
@@ -1260,7 +1139,7 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
               </div>
 
               <form
-                onSubmit={handleSaveManualPayment}
+                onSubmit={handleSubmitReportedPayment}
                 className="space-y-3 text-xs"
               >
                 <div className="space-y-1">
@@ -1286,16 +1165,15 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
                   </label>
                   <select
                     value={paymentMethod}
-                    onChange={(e) =>
-                      setPaymentMethod(e.target.value)
-                    }
+                    onChange={(e) => setPaymentMethod(e.target.value)}
                     className="w-full rounded-lg bg-neutral-950 border border-neutral-700 px-3 py-2 text-neutral-50 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
-                    <option>Online portal</option>
-                    <option>Card in office</option>
-                    <option>Money order</option>
-                    <option>Cash</option>
-                    <option>Other</option>
+                    <option value="money_order">Money order</option>
+                    <option value="cash">Cash</option>
+                    <option value="cashier_check">Cashier’s check</option>
+                    <option value="zelle">Zelle</option>
+                    <option value="venmo">Venmo</option>
+                    <option value="other">Other</option>
                   </select>
                 </div>
 
@@ -1309,7 +1187,7 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
                       setPaymentNote(e.target.value)
                     }
                     className="w-full min-h-[80px] rounded-lg bg-neutral-950 border border-neutral-700 px-3 py-2 text-neutral-50 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    placeholder="Example: Paid at office, money order #1234."
+                    placeholder="Example: Money order #1234 dropped at office on Jan 5."
                   />
                 </div>
 
@@ -1330,7 +1208,7 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
                   disabled={paymentSaving}
                   className="px-4 py-2 rounded-lg bg-indigo-500 hover:bg-indigo-400 text-xs font-semibold text-white disabled:opacity-60"
                 >
-                  {paymentSaving ? "Saving..." : "Save payment"}
+                  {paymentSaving ? "Submitting..." : "Submit report (pending)"}
                 </button>
               </form>
             </section>
@@ -1358,16 +1236,24 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
                         ${p.amount.toFixed(2)}
                       </div>
                       <div className="text-neutral-500">
-                        {p.method || "Payment"}
+                        {(p.status === "pending" && p.source === "tenant_reported")
+                          ? "Reported (pending)"
+                          : p.status === "posted"
+                            ? "Posted"
+                            : p.status === "rejected"
+                              ? "Rejected"
+                              : "Payment"}
+                        {p.method ? ` • ${PAYMENT_METHOD_LABELS[p.method] ?? p.method}` : ""}
                         {p.note ? ` – ${p.note}` : ""}
                       </div>
+
                     </div>
                     <div className="text-neutral-500">
-                      {p.created_at
-                        ? new Date(
-                          p.created_at
-                        ).toLocaleDateString()
-                        : ""}
+                      {p.status === "posted" && p.posted_at
+                        ? `Posted: ${new Date(p.posted_at).toLocaleDateString()}`
+                        : p.created_at
+                          ? new Date(p.created_at).toLocaleDateString()
+                          : ""}
                     </div>
                   </div>
                 ))}
@@ -1727,7 +1613,7 @@ const TenantPortal: React.FC<Props> = ({ user, onLogout }) => {
                   onClick={() => setActiveSection("Payments")}
                 >
                   {overallBalance && overallBalance > 0
-                    ? "Pay or record payment"
+                    ? "Pay or report payment"
                     : "View Payment History"}
                 </button>
                 <button className="text-[11px] text-neutral-400 underline underline-offset-2">

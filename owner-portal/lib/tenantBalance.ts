@@ -1,11 +1,5 @@
 // portal/src/lib/tenantBalance.ts
-
-import { createServerClient } from './supabaseServer';
-
-/**
- * Shapes used by the tenant portal for balances & ledger.
- * Adjust field names if your tables differ.
- */
+import { createServerClient } from "./supabaseServer";
 
 export type TenantRow = {
   id: string;
@@ -17,163 +11,133 @@ export type TenantRow = {
 export type ChargeRow = {
   id: string;
   tenant_id: string;
-  amount_cents: number;
+  amount: number | null;
   description: string | null;
-  due_date: string | null;
+  due_date?: string | null;
   created_at: string;
-  // optional because older rows may not have it yet
   is_paid?: boolean | null;
 };
 
 export type PaymentRow = {
   id: string;
   tenant_id: string;
-  amount_cents: number;
+  amount: number | null;
   method: string | null;
   note: string | null;
-  received_at: string | null;
+  received_at?: string | null;
   created_at: string;
+
+  status?: string | null;
+  source?: string | null;
+  posted_at?: string | null;
 };
 
 export type TenantLedger = {
   tenant: TenantRow | null;
   charges: ChargeRow[];
   payments: PaymentRow[];
-  balanceCents: number;
+  balanceDollars: number;
+  totals?: { totalCharges: number; totalPaymentsPosted: number };
 };
 
-/**
- * Load a single tenant row for the balance / ledger view
- * in the tenant portal.
- */
-export async function getTenantForBalance(
-  tenantId: string
-): Promise<TenantRow | null> {
-  if (!tenantId) {
-    console.error(
-      '[tenantBalance] getTenantForBalance called without tenantId'
-    );
-    return null;
-  }
+function toDollars(amount: any): number {
+  const n = Number(amount);
+  return Number.isFinite(n) ? n : 0;
+}
 
+export async function getTenantForBalance(tenantId: string): Promise<TenantRow | null> {
   const supabase = await createServerClient();
-
   const { data, error } = await supabase
-    .from('tenants')
-    .select('id, full_name, email, unit_label')
-    .eq('id', tenantId)
+    .from("tenants")
+    .select("id, full_name, email, unit_label")
+    .eq("id", tenantId)
     .single();
 
   if (error) {
-    console.error('[tenantBalance] failed to load tenant', error);
+    console.error("[tenantBalance] failed to load tenant", error);
     return null;
   }
-
-  if (!data) return null;
-
-  return data as TenantRow;
+  return (data ?? null) as TenantRow | null;
 }
 
-/**
- * Load tenant + all charges & payments for that tenant
- * for display in the tenant portal (summary + history).
- */
-export async function getTenantLedger(
-  tenantId: string
-): Promise<TenantLedger> {
-  if (!tenantId) {
-    console.error('[tenantBalance] getTenantLedger called without tenantId');
-    return {
-      tenant: null,
-      charges: [],
-      payments: [],
-      balanceCents: 0,
-    };
-  }
-
+export async function getTenantLedger(tenantId: string): Promise<TenantLedger> {
   const supabase = await createServerClient();
 
-  // 1) Tenant details
   const tenant = await getTenantForBalance(tenantId);
   const effectiveTenantId = tenant?.id ?? tenantId;
 
-  // 2) Charges (newest first for history)
-  const {
-    data: chargesData,
-    error: chargesError,
-  } = await supabase
-    .from('tenant_charges')
-    .select('*')
-    .eq('tenant_id', effectiveTenantId)
-    .order('created_at', { ascending: false });
+  const { data: chargesData, error: chargesError } = await supabase
+    .from("charges")
+    .select("id, tenant_id, amount, description, due_date, created_at, is_paid")
+    .eq("tenant_id", effectiveTenantId)
+    .order("created_at", { ascending: false });
 
-  if (chargesError) {
-    console.error('[tenantBalance] charges fetch error:', chargesError);
-  }
+  if (chargesError) console.error("[tenantBalance] charges fetch error:", chargesError);
 
   const charges: ChargeRow[] = (chargesData ?? []) as ChargeRow[];
 
-  // 3) Payments (newest first for history)
-  const {
-    data: paymentsData,
-    error: paymentsError,
-  } = await supabase
-    .from('tenant_payments')
-    .select('*')
-    .eq('tenant_id', effectiveTenantId)
-    .order('created_at', { ascending: false });
+  const { data: paymentsData, error: paymentsError } = await supabase
+    .from("payments")
+    .select("id, tenant_id, amount, method, note, received_at, created_at, status, source, posted_at")
+    .eq("tenant_id", effectiveTenantId)
+    .order("created_at", { ascending: false });
 
-  if (paymentsError) {
-    console.error('[tenantBalance] payments fetch error:', paymentsError);
-  }
+  if (paymentsError) console.error("[tenantBalance] payments fetch error:", paymentsError);
 
   const payments: PaymentRow[] = (paymentsData ?? []) as PaymentRow[];
 
-  // 4) Compute balance = sum(charges) - sum(payments)
-  const totalCharges = charges.reduce(
-    (sum, c) => sum + (c.amount_cents ?? 0),
-    0
-  );
-  const totalPayments = payments.reduce(
-    (sum, p) => sum + (p.amount_cents ?? 0),
-    0
-  );
+  const totalCharges = charges.reduce((sum, c) => sum + toDollars(c.amount), 0);
+
+  const totalPaymentsPosted = payments
+    .filter((p) => (p.status ?? "pending") === "posted" || p.source === "stripe")
+    .reduce((sum, p) => sum + toDollars(p.amount), 0);
+
+  const balanceDollars = totalCharges - totalPaymentsPosted;
 
   return {
     tenant,
     charges,
     payments,
-    balanceCents: totalCharges - totalPayments,
+    balanceDollars,
+    totals: { totalCharges, totalPaymentsPosted },
   };
 }
 
-/**
- * Oldest unpaid charge for a tenant.
- * This is the charge we attach Stripe card payments to.
- */
 export async function getCurrentPayableCharge(tenantId: string) {
-  if (!tenantId) {
-    console.error(
-      '[tenantBalance] getCurrentPayableCharge called without tenantId'
-    );
-    return null;
-  }
-
   const supabase = await createServerClient();
 
   const { data, error } = await supabase
-    .from('tenant_charges')
-    .select('*')
-    .eq('tenant_id', tenantId)
-    .eq('is_paid', false) // make sure you have this boolean column
-    .order('due_date', { ascending: true }) // oldest first
+    .from("charges")
+    .select("id, tenant_id, amount, description, due_date, created_at, is_paid")
+    .eq("tenant_id", tenantId)
+    .eq("is_paid", false)
+    .order("due_date", { ascending: true, nullsFirst: false })
     .limit(1)
     .maybeSingle();
 
   if (error) {
-    console.error('[tenantBalance] getCurrentPayableCharge error', error);
+    console.error("[tenantBalance] getCurrentPayableCharge error", error);
     return null;
   }
 
   return data as ChargeRow | null;
+}
+
+export async function getCurrentPayableChargeWithAmount(tenantId: string) {
+  const ledger = await getTenantLedger(tenantId);
+  if (ledger.balanceDollars <= 0) return null;
+
+  // pick a charge to attach Stripe to (oldest by due_date)
+  const supabase = await createServerClient();
+  const { data } = await supabase
+    .from("charges")
+    .select("id, tenant_id, amount, description, due_date, created_at, is_paid")
+    .eq("tenant_id", tenantId)
+    .order("due_date", { ascending: true, nullsFirst: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (!data) return null;
+
+  return { ...(data as ChargeRow), amountDollars: Math.min(toDollars(data.amount), ledger.balanceDollars) };
 }

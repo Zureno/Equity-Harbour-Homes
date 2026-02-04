@@ -13,6 +13,7 @@ export default function LogoutButton() {
 
   return (
     <button
+      suppressHydrationWarning
       onClick={logout}
       className="text-xs text-neutral-400 hover:text-red-400"
     >
